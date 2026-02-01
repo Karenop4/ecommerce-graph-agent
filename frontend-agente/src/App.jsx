@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import axios from "axios";
 import ReactMarkdown from "react-markdown";
-import { Send, User, Bot, ThumbsUp, ThumbsDown, X, Check } from "lucide-react";
+import { ArrowUp, User, Bot, ThumbsUp, ThumbsDown, X, Check } from "lucide-react";
 import "./App.css";
 
 // Configuración de la API
@@ -208,7 +208,7 @@ function App() {
             rows={1}
           />
           <button onClick={sendMessage} disabled={loading || !input.trim()}>
-            <Send size={20} />
+            <ArrowUp size={20} strokeWidth={2} />
           </button>
         </div>
       </div>
