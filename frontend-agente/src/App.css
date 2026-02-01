@@ -1,0 +1,350 @@
+/* =========================================
+   1. RESET Y ESTRUCTURA BASE (Fix del Scroll)
+   ========================================= */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+html, body {
+  height: 100%; /* Ocupar toda la altura */
+  width: 100%;
+  background-color: #f0f2f5; /* Color de fondo base para evitar el negro */
+  overflow: hidden; /* ¡CLAVE! Evita que se mueva la página entera */
+}
+
+#root {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  justify-content: center;
+  background-color: #f0f2f5;
+}
+
+/* Contenedor Principal de la App */
+.app-container {
+  width: 100%;
+  max-width: 800px; /* Ancho tipo móvil/tablet en PC */
+  height: 100%;
+  display: flex;
+  flex-direction: column; /* Apila: Header, Chat, Input */
+  background: white;
+  box-shadow: 0 0 20px rgba(0,0,0,0.05);
+  position: relative;
+}
+
+/* =========================================
+   2. HEADER (ESTÁTICO)
+   ========================================= */
+.chat-header {
+  flex: 0 0 auto; /* No crecer, no encoger (se queda fijo) */
+  padding: 1rem 1.5rem;
+  background: white;
+  border-bottom: 1px solid #e5e7eb;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  z-index: 10;
+}
+
+.chat-header h1 {
+  font-size: 1.2rem;
+  color: #1f2937;
+  font-weight: 700;
+}
+
+.status-badge {
+  background: #dcfce7;
+  color: #166534;
+  padding: 4px 12px;
+  border-radius: 99px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+/* =========================================
+   3. VENTANA DE CHAT (SCROLLABLE)
+   ========================================= */
+.chat-window {
+  flex: 1; /* Ocupa todo el espacio sobrante */
+  overflow-y: auto; /* Habilita el scroll SOLO aquí */
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  background-color: #fafafa;
+  scroll-behavior: smooth;
+}
+
+/* Estilos de Mensajes */
+.message-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  width: 100%;
+}
+
+.message-row.user {
+  flex-direction: row-reverse; /* Usuario a la derecha */
+}
+
+/* Columna que agrupa burbuja + feedback */
+.message-column {
+  display: flex;
+  flex-direction: column;
+  max-width: 80%; /* El mensaje ocupa máx el 80% de la pantalla */
+  align-items: flex-start;
+}
+
+.message-row.user .message-column {
+  align-items: flex-end;
+}
+
+/* Avatar */
+.avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.bot .avatar { background: #eff6ff; color: #2563eb; }
+.user .avatar { background: #f3f4f6; color: #4b5563; }
+
+/* Burbuja de Texto */
+.message-bubble {
+  width: 100%; /* Ocupa todo el ancho de su columna padre */
+  padding: 12px 16px;
+  border-radius: 12px;
+  line-height: 1.5;
+  font-size: 0.95rem;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+  position: relative;
+  word-wrap: break-word; /* Evita que textos largos rompan el diseño */
+}
+
+.bot .message-bubble {
+  background: white;
+  color: #374151;
+  border: 1px solid #e5e7eb;
+  border-top-left-radius: 2px;
+}
+
+.user .message-bubble {
+  background: #2563eb;
+  color: white;
+  border-top-right-radius: 2px;
+}
+
+.message-bubble.error {
+  background: #fef2f2;
+  border-color: #fee2e2;
+  color: #991b1b;
+}
+
+/* Estilos Markdown */
+.message-bubble ul { margin-left: 1.2rem; margin-top: 0.5rem; }
+.message-bubble p { margin-bottom: 0.5rem; }
+.message-bubble p:last-child { margin-bottom: 0; }
+.message-bubble strong { color: inherit; font-weight: 700; }
+
+/* =========================================
+   4. FEEDBACK Y FORMULARIOS
+   ========================================= */
+.feedback-section {
+  margin-top: 4px;
+  display: flex;
+  justify-content: flex-start;
+}
+
+.feedback-actions {
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.feedback-label {
+  font-size: 0.75rem;
+  color: #9ca3af;
+}
+
+.btn-icon {
+  background: none;
+  border: 1px solid transparent;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  color: #9ca3af;
+  transition: all 0.2s;
+  display: flex;
+}
+
+.btn-icon:hover { background: #f3f4f6; color: #4b5563; border-color: #e5e7eb; }
+.btn-icon.up:hover { color: #16a34a; }
+.btn-icon.down:hover { color: #dc2626; }
+
+.feedback-sent {
+  font-size: 0.75rem;
+  color: #059669;
+  font-weight: 600;
+  background: #ecfdf5;
+  padding: 2px 8px;
+  border-radius: 4px;
+  margin-top: 4px;
+}
+
+/* Formulario desplegable */
+.feedback-form {
+  margin-top: 8px;
+  background: white;
+  border: 1px solid #e5e7eb;
+  padding: 12px;
+  border-radius: 8px;
+  width: 100%;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+  animation: slideDown 0.3s ease;
+}
+
+.feedback-instruction {
+  margin: 0 0 8px 0;
+  font-weight: 600;
+  color: #374151;
+  font-size: 0.85rem;
+}
+
+.feedback-input {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  margin-bottom: 10px;
+  resize: none;
+  font-family: inherit;
+  font-size: 0.9rem;
+  color: #1f2937;
+}
+
+.feedback-input:focus {
+  outline: none;
+  border-color: #2563eb;
+}
+
+.feedback-buttons {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.btn-cancel {
+  background: white;
+  border: 1px solid #d1d5db;
+  color: #374151;
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.btn-submit {
+  background: #ef4444;
+  color: white;
+  border: none;
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  display: flex;
+  align-items: center;
+  font-weight: 500;
+}
+
+.btn-submit:disabled {
+  background: #fca5a5;
+  cursor: not-allowed;
+}
+
+/* =========================================
+   5. INPUT AREA (ESTÁTICO ABAJO)
+   ========================================= */
+.input-area {
+  flex: 0 0 auto; /* No crecer, no encoger */
+  padding: 1.5rem;
+  background: white;
+  border-top: 1px solid #e5e7eb;
+}
+
+.input-wrapper {
+  display: flex;
+  gap: 10px;
+  background: #f9fafb;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid #e5e7eb;
+  transition: border-color 0.2s;
+  align-items: flex-end; /* Alinea botón abajo si el texto crece */
+}
+
+.input-wrapper:focus-within {
+  border-color: #2563eb;
+  background: white;
+}
+
+textarea {
+  flex: 1;
+  border: none;
+  background: transparent;
+  padding: 4px;
+  resize: none;
+  outline: none;
+  font-size: 0.95rem;
+  max-height: 120px;
+  color: #1f2937;
+  font-family: inherit;
+}
+
+.input-wrapper button {
+  background: #2563eb;
+  color: white;
+  border: none;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background 0.2s;
+}
+
+.input-wrapper button:hover { background: #1d4ed8; }
+.input-wrapper button:disabled { background: #9ca3af; cursor: not-allowed; }
+
+.hint-text {
+  margin-top: 8px;
+  font-size: 0.75rem;
+  color: #9ca3af;
+  text-align: center;
+}
+
+/* =========================================
+   6. ANIMACIONES Y EXTRAS
+   ========================================= */
+.loading .dot { animation: blink 1.4s infinite both; }
+.loading .dot:nth-child(2) { animation-delay: 0.2s; }
+.loading .dot:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes blink { 0% { opacity: 0.2; } 20% { opacity: 1; } 100% { opacity: 0.2; } }
+@keyframes slideDown { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+/* Scrollbar personalizado */
+.chat-window::-webkit-scrollbar { width: 6px; }
+.chat-window::-webkit-scrollbar-track { background: transparent; }
+.chat-window::-webkit-scrollbar-thumb { background-color: #d1d5db; border-radius: 10px; }

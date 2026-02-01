@@ -1,0 +1,8 @@
+.env
+__pycache__
+neo4j_data/
+neo4j_logs/
+mlflow_db/
+mlflow_artifacts/
+venv/
+.DS_Store

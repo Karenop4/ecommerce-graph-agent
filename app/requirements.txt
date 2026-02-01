@@ -1,0 +1,21 @@
+# --- API y Servidor ---
+fastapi
+uvicorn
+pydantic
+python-dotenv
+
+# --- Base de Datos ---
+neo4j
+
+# --- IA y Orquestación ---
+langchain
+langchain-core
+langchain-openai
+openai
+
+# --- Embeddings (Modelo Local) ---
+# Nota: Esto instalará PyTorch y puede ser pesado (aprox 700MB-1GB)
+sentence-transformers
+
+# --- MLOps y Registro ---
+mlflow
