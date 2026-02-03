@@ -1,32 +1,40 @@
 import { useState, useRef, useEffect } from "react";
 import axios from "axios";
 import ReactMarkdown from "react-markdown";
-import { ArrowUp, User, Bot, ThumbsUp, ThumbsDown, X, Check } from "lucide-react";
+import { ArrowUp, User, Bot, ThumbsUp, ThumbsDown, Send } from "lucide-react";
 import "./App.css";
 
-// Configuración de la API
 const API_URL = "http://localhost:8000";
 
 function App() {
   const [messages, setMessages] = useState([
     {
       role: "bot",
-      content: "¡Hola! Soy tu asistente de ventas experto. 🤖\nPuedo ayudarte a encontrar productos o recibir tus correcciones si me equivoco.",
-      type: "text"
-    }
+      content:
+        "¡Hola! Soy tu asistente de ventas experto. 🤖\nPuedo ayudarte a encontrar productos o recibir tus correcciones si me equivoco.",
+      type: "text",
+    },
   ]);
+
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  
-  // --- NUEVO: Estado para manejar la cajita de comentario ---
+
   const [activeFeedback, setActiveFeedback] = useState(null); // { runId, index }
   const [commentText, setCommentText] = useState("");
-  
+
   const messagesEndRef = useRef(null);
+  const feedbackTextareaRef = useRef(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, activeFeedback]); // Scrollear también si se abre el feedback
+  }, [messages, activeFeedback]);
+
+  useEffect(() => {
+    if (activeFeedback) {
+      // pequeño delay para asegurar que el textarea ya se renderizó
+      setTimeout(() => feedbackTextareaRef.current?.focus(), 0);
+    }
+  }, [activeFeedback]);
 
   const sendMessage = async () => {
     if (!input.trim()) return;
@@ -36,10 +44,14 @@ function App() {
     setInput("");
     setLoading(true);
 
+    // Si había un feedback abierto, ciérralo al mandar otro mensaje
+    setActiveFeedback(null);
+    setCommentText("");
+
     try {
       const response = await axios.post(`${API_URL}/chat`, {
         query: userMessage.content,
-        user_id: "usuario_demo"
+        user_id: "usuario_demo",
       });
 
       const data = response.data;
@@ -48,7 +60,7 @@ function App() {
         role: "bot",
         content: data.response,
         run_id: data.run_id,
-        feedbackGiven: false
+        feedbackGiven: false,
       };
 
       setMessages((prev) => [...prev, botMessage]);
@@ -56,51 +68,46 @@ function App() {
       console.error("Error:", error);
       setMessages((prev) => [
         ...prev,
-        { role: "bot", content: "⚠️ Error de conexión con el servidor.", isError: true }
+        { role: "bot", content: "⚠️ Error de conexión con el servidor.", isError: true },
       ]);
     } finally {
       setLoading(false);
     }
   };
 
-  // --- FUNCIÓN MODIFICADA PARA ENVIAR FEEDBACK ---
   const sendFeedback = async (runId, score, index, customComment = null) => {
     try {
-      // Si es positivo (1), mensaje por defecto. Si es negativo (0), usamos el comentario del usuario.
-      const finalComment = customComment || (score === 1 ? "Usuario satisfecho" : "Error reportado");
+      const cleanComment = (customComment ?? "").trim();
+      const finalComment =
+        score === 1 ? "Usuario satisfecho" : (cleanComment || "Error reportado");
 
       await axios.post(`${API_URL}/feedback`, {
         run_id: runId,
-        score: score,
-        comment: finalComment
+        score,
+        comment: finalComment,
       });
 
-      // Actualizar UI para mostrar que ya votó
-      setMessages((prev) => 
-        prev.map((msg, i) => 
+      setMessages((prev) =>
+        prev.map((msg, i) =>
           i === index ? { ...msg, feedbackGiven: true, feedbackScore: score } : msg
         )
       );
 
-      // Limpiar estados de feedback
       setActiveFeedback(null);
       setCommentText("");
 
-      if (score === 0 && customComment) {
+      if (score === 0 && cleanComment.length >= 5) {
         alert("¡Gracias! He guardado tu corrección en mi memoria para la próxima vez.");
       }
-
     } catch (error) {
       console.error("Error enviando feedback:", error);
     }
   };
 
-  // Manejador para abrir el input cuando dan click en 👎
   const handleThumbsDown = (runId, index) => {
     setActiveFeedback({ runId, index });
   };
 
-  // Manejador para cancelar el comentario
   const cancelFeedback = () => {
     setActiveFeedback(null);
     setCommentText("");
@@ -126,25 +133,30 @@ function App() {
             <div className="avatar">
               {msg.role === "bot" ? <Bot size={24} /> : <User size={24} />}
             </div>
-            
-            <div className={`message-column`}>
+
+            <div className="message-column">
               <div className={`message-bubble ${msg.isError ? "error" : ""}`}>
                 <ReactMarkdown>{msg.content}</ReactMarkdown>
               </div>
 
-              {/* BARRA DE ACCIONES (FEEDBACK) */}
               {msg.role === "bot" && msg.run_id && (
                 <div className="feedback-section">
                   {!msg.feedbackGiven ? (
                     <div className="feedback-actions">
                       <span className="feedback-label">¿Útil?</span>
-                      {/* Thumbs Up: Envía directo */}
-                      <button onClick={() => sendFeedback(msg.run_id, 1, index)} className="btn-icon up">
+                      <button
+                        onClick={() => sendFeedback(msg.run_id, 1, index)}
+                        className="btn-icon up"
+                        aria-label="Útil"
+                      >
                         <ThumbsUp size={14} />
                       </button>
-                      
-                      {/* Thumbs Down: Abre formulario */}
-                      <button onClick={() => handleThumbsDown(msg.run_id, index)} className="btn-icon down">
+
+                      <button
+                        onClick={() => handleThumbsDown(msg.run_id, index)}
+                        className="btn-icon down"
+                        aria-label="No útil"
+                      >
                         <ThumbsDown size={14} />
                       </button>
                     </div>
@@ -156,13 +168,11 @@ function App() {
                 </div>
               )}
 
-              {/* FORMULARIO DE CORRECCIÓN (Aparece solo si activeFeedback coincide con este mensaje) */}
               {activeFeedback && activeFeedback.index === index && !msg.feedbackGiven && (
                 <div className="feedback-form">
-                  <p className="feedback-instruction">
-                    ¿Qué dato está mal? (Ayúdame a aprender):
-                  </p>
+                  <p className="feedback-instruction">¿Qué dato está mal? (Ayúdame a aprender):</p>
                   <textarea
+                    ref={feedbackTextareaRef}
                     className="feedback-input"
                     value={commentText}
                     onChange={(e) => setCommentText(e.target.value)}
@@ -173,12 +183,12 @@ function App() {
                     <button className="btn-cancel" onClick={cancelFeedback}>
                       Cancelar
                     </button>
-                    <button 
-                      className="btn-submit" 
+                    <button
+                      className="btn-submit"
                       onClick={() => sendFeedback(msg.run_id, 0, index, commentText)}
-                      disabled={commentText.length < 5} // Evita enviar vacíos
+                      disabled={commentText.trim().length < 5}
                     >
-                      Enviar Corrección <Send size={12} style={{marginLeft: 4}}/>
+                      Enviar Corrección <Send size={12} style={{ marginLeft: 6 }} />
                     </button>
                   </div>
                 </div>
@@ -186,12 +196,16 @@ function App() {
             </div>
           </div>
         ))}
-        
+
         {loading && (
           <div className="message-row bot">
-            <div className="avatar"><Bot size={24} /></div>
+            <div className="avatar">
+              <Bot size={24} />
+            </div>
             <div className="message-bubble loading">
-              <span className="dot">.</span><span className="dot">.</span><span className="dot">.</span>
+              <span className="dot">.</span>
+              <span className="dot">.</span>
+              <span className="dot">.</span>
             </div>
           </div>
         )}

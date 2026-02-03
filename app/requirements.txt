@@ -19,3 +19,6 @@ sentence-transformers
 
 # --- MLOps y Registro ---
 mlflow
+
+# --- Estado Conversacional ---
+redis

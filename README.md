@@ -168,6 +168,48 @@ grafo-conocimiento/
 
 ---
 
+## Funciones, queries y embeddings (Neo4j + Redis + OpenAI)
+
+| Function / Tool | Para qué sirve | BD / Servicio usado | Estado que lee/escribe | Query (Cypher / Redis) | Embeddings (modelo + dónde) | Ejemplos de input | Ejemplo de output |
+|---|---|---|---|---|---|---|---|
+| `buscar_productos(query, user_id)` | Busca productos similares por texto (catálogo, NO stock). Devuelve lista y guarda candidatos para ordinales. | **Neo4j** (Vector Index) + Redis (estado) | **Escribe:** `last_candidates`, `selected_product_id`, `stage=decide` | **Cypher (Vector Search):**<br>`CALL db.index.vector.queryNodes('productos_embeddings', 5, $vector) YIELD node AS p, score WHERE score > 0.5 ... RETURN p.id, p.nombre, p.precio, p.descripcion, collect(acc), collect(correcciones)` | **SentenceTransformers**: `all-MiniLM-L6-v2`<br>Usado para `vector = embed(query)`<br>**Index:** `productos_embeddings` (Neo4j) | `"laptop ligera para viajar"` | Lista tipo:<br>`1) [L1] MacBook Air M2 ($1200)` |
+| `seleccionar_opcion(opcion, user_id)` | Selecciona el producto "la segunda/2/tercera" basado en `last_candidates`. | Redis | **Lee:** `last_candidates`<br>**Escribe:** `selected_product_id`, `stage=decide` | **Redis key:** `session:{user_id}` (JSON) | No usa embeddings | `"la segunda"` / `"2"` | `"Seleccionaste: Dell XPS 13 [L2]"` |
+| `agregar_al_carrito(producto_ref, qty, user_id)` | Agrega un producto al carrito por ordinal, id o nombre aproximado. Suma qty si ya existe. | Neo4j + Redis | **Lee:** `last_candidates` (si ordinal), `cart_items`<br>**Escribe:** `cart_items`, `selected_product_id`, `stage=decide` | **(a) Ordinal:** usa `last_candidates` (Redis)<br>**(b) ID:** `MATCH (p:Producto {id:$id}) RETURN ...`<br>**(c) Nombre:** vector search top-1 con score>0.6 | **all-MiniLM-L6-v2** si es por nombre (no id)<br>Consulta a `productos_embeddings` (Neo4j) | `"la primera"` / `"L1"` / `"MacBook Air"` | `"✅ Agregado... + carrito actualizado"` |
+| `remover_del_carrito(items_ref, user_id)` | Quita 1 o varios ítems del carrito por nombre/id o por "item 1, 3". NO vacía todo. | Redis | **Lee/Escribe:** `cart_items` | **Redis key:** `session:{user_id}` (JSON)<br>Parsing: split por `,` y `" y "` o índices | No usa embeddings | `"quita logitech, razer y dell"` / `"quita 1 y 3"` | `"✅ Quité... + carrito actualizado"` |
+| `ver_carrito(user_id)` | Muestra carrito y total. | Redis | **Lee:** `cart_items` | **Redis key:** `session:{user_id}` | No usa embeddings | `"ver carrito"` | Texto con total y subtotales |
+| `vaciar_carrito(user_id)` | Vacía el carrito SOLO si el usuario lo pide explícitamente. | Redis | **Escribe:** `cart_items=[]` | **Redis key:** `session:{user_id}` | No usa embeddings | `"vacía el carrito"` | `"🧹 Listo. Carrito vaciado."` |
+| `verificar_stock(producto_ref, tienda, user_id)` | Revisa stock por tienda para un producto. Si no hay `producto_ref`, usa `selected_product_id`. | Neo4j + Redis | **Lee:** `selected_product_id` (si `producto_ref` vacío)<br>**Escribe:** `selected_product_id`, `selected_store` (si tienda), `stage=buy` | **Resolver producto:**<br>- ID: `MATCH (p:Producto {id:$id}) ...`<br>- Nombre: vector search score>0.6<br>**Stock:** `MATCH (t:Tienda)-[s:TIENE_STOCK]->(p:Producto {id:$pid}) RETURN t.nombre, s.cantidad ORDER BY cantidad DESC` | **all-MiniLM-L6-v2** solo si se resuelve por nombre | `"ver stock de MacBook Air"` / `"stock L1"` / `"stock en Tienda Central"` | Lista stock por tienda |
+| `verificar_stock_carrito(tienda, user_id)` | Revisa stock para TODO el carrito. Si no pasas tienda, guarda `selected_store` como la mejor tienda del primer item. | Neo4j + Redis | **Lee:** `cart_items`<br>**Escribe:** `selected_store` (auto), `stage=buy` | Por cada item:<br>`MATCH (t:Tienda)-[s:TIENE_STOCK]->(p:Producto {id:$pid}) RETURN t.nombre, s.cantidad ORDER BY cantidad DESC` | No requiere embeddings (ya tiene ids en carrito) | `"quiero comprar"` / `"ver stock del carrito"` | Resumen por producto + tienda recomendada |
+| `obtener_contacto_tienda(nombre_tienda, user_id)` | Devuelve teléfono/WhatsApp/horario/dirección. Si nombre vacío, usa `selected_store`. | Neo4j + Redis | **Lee:** `selected_store` (fallback)<br>**Escribe:** `selected_store`, `stage=contact` | `MATCH (t:Tienda) WHERE toLower(t.nombre) CONTAINS toLower($name) RETURN ... LIMIT 1` | No usa embeddings | `"dame el whatsapp"` / `"contacto Tienda Central"` | Card de contacto (texto) |
+| `finalizar_compra(tienda, user_id)` *(recomendado)* | Flujo "proceder a compra": valida stock en tienda, devuelve "✅ Compra realizada", muestra local/contacto y productos, y vacía carrito. | Neo4j + Redis | **Lee:** `cart_items`, `selected_store`<br>**Escribe:** `stage=done`, `cart_items=[]` | 1) Elegir tienda (si no hay): stock del primer item top-1<br>2) Validar stock por item en esa tienda<br>3) Traer contacto de tienda | No requiere embeddings | `"proceder a compra"` / `"finalizar compra"` | `"✅ Compra realizada... Acércate a... Productos comprados..."` |
+| `registrar_correccion(entidad, correccion, user_id)` | Guarda correcciones del usuario (producto/tienda) como nodo `Aprendizaje`. | Neo4j + Redis | **Lee:** `selected_product_id` o `selected_store` para auto-asociar | **Producto:** `MATCH (p:Producto {id:$pid}) CREATE (c:Aprendizaje {...}) MERGE (p)-[:TIENE_CORRECCION]->(c)`<br>**Tienda:** `MATCH (t:Tienda {nombre:$tienda}) CREATE ... MERGE (t)-[:TIENE_CORRECCION]->(c)`<br>**Fallback por embeddings:** vector search score>0.7 | **all-MiniLM-L6-v2** solo en fallback (para asociar corrección a producto) | `"corrige: ese precio está mal"` | `"✅ Corrección guardada para..."` |
+
+---
+
+## BD y estructura recomendada (resumen)
+- **Neo4j**:
+  - `(:Producto {id, nombre, precio, descripcion})`
+  - `(:Tienda {nombre, canal, telefono, whatsapp, direccion, horario})`
+  - `(:Aprendizaje {nota, fecha, origen})`
+  - Relaciones:
+    - `(t:Tienda)-[:TIENE_STOCK {cantidad}]->(p:Producto)`
+    - `(p:Producto)-[:COMPATIBLE_CON]->(acc:Producto)`
+    - `(p:Producto)-[:TIENE_CORRECCION]->(c:Aprendizaje)` / `(t:Tienda)-[:TIENE_CORRECCION]->(c:Aprendizaje)`
+  - **Vector index**: `productos_embeddings` sobre embedding del producto.
+
+- **Redis**:
+  - Key: `session:{user_id}`
+  - Value JSON:
+    - `stage`, `selected_product_id`, `selected_store`, `last_candidates`, `cart_items`, `last_intent`
+
+- **Embeddings**
+  - Modelo: `sentence-transformers/all-MiniLM-L6-v2`
+  - Uso:
+    - Query de usuario → vector → `productos_embeddings`
+    - (opcional) asociar correcciones por similitud cuando no hay `selected_product_id`
+
+---
+
 ## Features
 
 ### 1. **Intelligent Product Search**

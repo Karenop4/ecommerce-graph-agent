@@ -4,5 +4,6 @@ neo4j_data/
 neo4j_logs/
 mlflow_db/
 mlflow_artifacts/
+redis_data/
 venv/
 .DS_Store
