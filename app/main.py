@@ -1,16 +1,16 @@
-import os
 import json
 import uuid
 import time
 import logging
+from datetime import datetime, timezone
+from time import perf_counter
 from typing import Any, Dict, List, Optional, Tuple
 
 import mlflow
 import langchain
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
 
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
@@ -22,21 +22,17 @@ from sentence_transformers import SentenceTransformer
 
 import redis
 
+from core.config import load_settings
+from core.logging_utils import setup_structured_logging
+from core.guards import is_off_topic_query, off_topic_response
+from core.graph_search import buscar_en_grafo, format_graph_search_results
 
 # ----------------------------------------------------------------------
 # 0) CONFIG
 # ----------------------------------------------------------------------
 langchain.debug = True
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    datefmt="%H:%M:%S",
-)
-logger = logging.getLogger("AGENTE_BACKEND")
-
-load_dotenv(dotenv_path="../.env")
-load_dotenv(dotenv_path=".env")
+logger = setup_structured_logging()
+settings = load_settings()
 
 app = FastAPI(title="Agente E-Commerce Conversacional + Redis (Planner + Logs)")
 
@@ -48,20 +44,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY = settings.openai_api_key
+NEO4J_URI = settings.neo4j_uri
+NEO4J_AUTH = settings.neo4j_auth
+REDIS_URL = settings.redis_url
+REDIS_TTL_SECONDS = settings.redis_ttl_seconds
 
-NEO4J_URI = os.getenv("NEO4J_URI")
-NEO4J_AUTH = (os.getenv("NEO4J_USER", "neo4j"), os.getenv("NEO4J_PASSWORD"))
+mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
+mlflow.set_experiment(settings.mlflow_experiment)
 
-# En Docker suele ser: redis://redis:6379/0
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-REDIS_TTL_SECONDS = int(os.getenv("REDIS_TTL_SECONDS", "86400"))  # 24h
-
-tracking_uri = os.getenv("MLFLOW_TRACKING_URI") or "http://localhost:5000"
-mlflow.set_tracking_uri(tracking_uri)
-mlflow.set_experiment("Agente_Produccion_Conversacional_Redis")
-
-logger.info(f"OPENAI_API_KEY loaded? {'YES' if OPENAI_API_KEY else 'NO'}")
+logger.info("config_loaded", extra={"extra": {"openai_api_key_loaded": bool(OPENAI_API_KEY), "neo4j_uri": NEO4J_URI, "redis_url": REDIS_URL}})
 
 # Recursos globales inicializados en startup (no en import)
 embedder: Optional[SentenceTransformer] = None
@@ -226,6 +218,54 @@ def update_state(user_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
     state.update(patch)
     save_state(user_id, state)
     return state
+
+
+def _queue_key(user_id: str) -> str:
+    return f"task_queue:{user_id}"
+
+
+def _events_key(user_id: str) -> str:
+    return f"events:{user_id}"
+
+
+def emit_event(user_id: str, level: str, event: str, payload: Optional[Dict[str, Any]] = None) -> None:
+    data = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "level": level,
+        "event": event,
+        "payload": payload or {},
+    }
+    logger.info(f"event={event} user_id={user_id} payload={payload or {}}")
+    if not rdb:
+        return
+    rdb.rpush(_events_key(user_id), json.dumps(data, ensure_ascii=False))
+    rdb.expire(_events_key(user_id), REDIS_TTL_SECONDS)
+
+
+def get_pending_queue(user_id: str) -> Optional[Dict[str, Any]]:
+    if not rdb:
+        return None
+    raw = rdb.get(_queue_key(user_id))
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict) and isinstance(data.get("steps"), list):
+            return data
+    except Exception:
+        return None
+    return None
+
+
+def save_queue(user_id: str, queue_data: Dict[str, Any]) -> None:
+    if not rdb:
+        return
+    rdb.setex(_queue_key(user_id), REDIS_TTL_SECONDS, json.dumps(queue_data, ensure_ascii=False))
+
+
+def clear_queue(user_id: str) -> None:
+    if rdb:
+        rdb.delete(_queue_key(user_id))
 
 
 def normalize_ordinal_to_index(text: str) -> Optional[int]:
@@ -872,6 +912,14 @@ def finalizar_compra(tienda: str = "", user_id: str = "anonimo") -> str:
     )
 
 
+@tool
+def buscar_relaciones_grafo(termino: str, user_id: str = "anonimo") -> str:
+    """Búsqueda BFS en el grafo (semillas por texto + expansión por relaciones)."""
+    logger.info("tool_buscar_relaciones_grafo", extra={"extra": {"user_id": user_id, "termino": termino}})
+    rows = buscar_en_grafo(driver, termino=termino, limite=5, max_depth=2)
+    return format_graph_search_results(rows)
+
+
 TOOLS = [
     buscar_productos,
     seleccionar_opcion,
@@ -884,6 +932,7 @@ TOOLS = [
     obtener_contacto_tienda,
     finalizar_compra,
     registrar_correccion,
+    buscar_relaciones_grafo,
 ]
 
 
@@ -933,6 +982,8 @@ Reglas conversacionales:
 - Corrección ("está mal", "no es así", "el precio real", "corrige") =>
   registrar_correccion(entidad="auto", correccion="...").
 
+- Si el usuario pide buscar relaciones en el grafo, nodos o estructura => buscar_relaciones_grafo(termino, user_id).
+
 - Si no necesitas tools => {"steps":[]}
 
 - Si el usuario pide "dónde comprar" o "muéstrame dónde", responde con:
@@ -963,6 +1014,7 @@ Tools válidas:
 - obtener_contacto_tienda(nombre_tienda, user_id)
 - finalizar_compra(tienda, user_id)
 - registrar_correccion(entidad, correccion, user_id)
+- buscar_relaciones_grafo(termino, user_id)
 """
 
 
@@ -994,13 +1046,23 @@ def planificar(query_text: str, router_label: str, user_id: str, state: Dict[str
 # ----------------------------------------------------------------------
 # 6) EXECUTOR (FASE 4)
 # ----------------------------------------------------------------------
-def ejecutar_plan(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Ejecuta cada step del plan."""
-    results = []
-    for idx, step in enumerate(plan.get("steps", []), start=1):
+def ejecutar_plan(plan: Dict[str, Any], user_id: str, trace_id: str, initial_results: Optional[List[Dict[str, Any]]] = None,
+                 start_index: int = 0) -> List[Dict[str, Any]]:
+    """Ejecuta cada step del plan y emite eventos para frontend."""
+    results = list(initial_results or [])
+    steps = plan.get("steps", [])
+    for idx in range(start_index, len(steps)):
+        step = steps[idx]
+        human_idx = idx + 1
         tool_name = step.get("tool")
         args = step.get("args", {}) or {}
-        logger.info(f"⚙️ [EXEC] Step {idx} | tool={tool_name} | args={args}")
+        emit_event(user_id, "info", "queue_step_start", {
+            "trace_id": trace_id,
+            "step": human_idx,
+            "total_steps": len(steps),
+            "tool": tool_name,
+            "args": args,
+        })
 
         if tool_name == "buscar_productos":
             out = buscar_productos.invoke(args)
@@ -1024,12 +1086,79 @@ def ejecutar_plan(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
             out = finalizar_compra.invoke(args)
         elif tool_name == "registrar_correccion":
             out = registrar_correccion.invoke(args)
+        elif tool_name == "buscar_relaciones_grafo":
+            out = buscar_relaciones_grafo.invoke(args)
         else:
             out = f"Tool desconocida: {tool_name}"
 
         results.append({"tool": tool_name, "args": args, "output": out})
-        logger.info(f"✅ [EXEC] Step {idx} | tool={tool_name} | output_len={len(str(out))}")
+        emit_event(user_id, "info", "queue_step_done", {
+            "trace_id": trace_id,
+            "step": human_idx,
+            "total_steps": len(steps),
+            "tool": tool_name,
+            "output_len": len(str(out)),
+        })
 
+    return results
+
+
+def ejecutar_o_reanudar_cola(plan: Dict[str, Any], user_id: str, trace_id: str) -> List[Dict[str, Any]]:
+    pending = get_pending_queue(user_id)
+    if pending and pending.get("steps"):
+        emit_event(user_id, "warning", "queue_resume_detected", {
+            "previous_trace_id": pending.get("trace_id"),
+            "pending_from_step": pending.get("next_index", 0) + 1,
+            "pending_total_steps": len(pending.get("steps", [])),
+        })
+        resumed_results = ejecutar_plan(
+            {"steps": pending["steps"]},
+            user_id=user_id,
+            trace_id=pending.get("trace_id", trace_id),
+            initial_results=pending.get("results", []),
+            start_index=int(pending.get("next_index", 0)),
+        )
+        clear_queue(user_id)
+        emit_event(user_id, "info", "queue_resume_completed", {
+            "resumed_steps": len(resumed_results),
+            "trace_id": pending.get("trace_id", trace_id),
+        })
+
+    queue_data = {
+        "trace_id": trace_id,
+        "steps": plan.get("steps", []),
+        "next_index": 0,
+        "results": [],
+    }
+    save_queue(user_id, queue_data)
+    emit_event(user_id, "info", "queue_enqueued", {
+        "trace_id": trace_id,
+        "total_steps": len(queue_data["steps"]),
+    })
+
+    results = []
+    steps = queue_data["steps"]
+    for idx in range(len(steps)):
+        queue_data["next_index"] = idx
+        save_queue(user_id, queue_data)
+
+        partial = ejecutar_plan(
+            {"steps": steps[idx:idx+1]},
+            user_id=user_id,
+            trace_id=trace_id,
+            start_index=0,
+        )
+        if partial:
+            queue_data["results"].append(partial[0])
+            queue_data["next_index"] = idx + 1
+            save_queue(user_id, queue_data)
+            results.append(partial[0])
+
+    clear_queue(user_id)
+    emit_event(user_id, "info", "queue_completed", {
+        "trace_id": trace_id,
+        "total_steps": len(steps),
+    })
     return results
 
 
@@ -1090,9 +1219,9 @@ def ejecutar_pipeline(query_text: str, trace_id: str, user_id: str) -> Dict[str,
     plan = planificar(query_text, router_label, user_id, state)
     logger.info(f"🗺️ [FASE 3] ({trace_id}) Plan={plan}")
 
-    logger.info(f"⚙️ [FASE 4] ({trace_id}) Ejecutando plan")
-    tool_results = ejecutar_plan(plan)
-    logger.info(f"⚙️ [FASE 4] ({trace_id}) tools={len(tool_results)}")
+    emit_event(user_id, "info", "phase_4_start", {"trace_id": trace_id})
+    tool_results = ejecutar_o_reanudar_cola(plan, user_id=user_id, trace_id=trace_id)
+    emit_event(user_id, "info", "phase_4_done", {"trace_id": trace_id, "tools": len(tool_results)})
 
     state_after = get_state(user_id)
 
@@ -1127,27 +1256,55 @@ class FeedbackRequest(BaseModel):
 @app.post("/chat")
 async def chat_endpoint(req: ChatRequest):
     trace_id = str(uuid.uuid4())[:8]
-    logger.info(f"🌐 [HTTP] /chat | trace_id={trace_id} | user_id={req.user_id} | query='{req.query}'")
+    logger.info("chat_request", extra={"extra": {"trace_id": trace_id, "user_id": req.user_id, "query": req.query}})
+    emit_event(req.user_id, "info", "chat_request", {"trace_id": trace_id, "query": req.query})
 
+    if is_off_topic_query(req.query):
+        logger.info("chat_off_topic_filtered", extra={"extra": {"trace_id": trace_id, "user_id": req.user_id}})
+        emit_event(req.user_id, "warning", "chat_off_topic_filtered", {"trace_id": trace_id})
+        return {"response": off_topic_response(), "run_id": None, "trace_id": trace_id, "status": "filtered"}
+
+    start = perf_counter()
     try:
         with mlflow.start_run() as run:
             run_id = run.info.run_id
             result = ejecutar_pipeline(req.query, trace_id, req.user_id)
+            latency_ms = (perf_counter() - start) * 1000
 
             mlflow.log_param("user_id", req.user_id)
             mlflow.log_param("trace_id", trace_id)
             mlflow.log_param("router_label", result["router"]["label"])
             mlflow.log_metric("router_score", float(result["router"]["score"]))
+            mlflow.log_metric("latency_ms", float(latency_ms))
             mlflow.log_text(json.dumps(result["plan"], ensure_ascii=False, indent=2), "plan.json")
             mlflow.log_text(result["response"], "respuesta_agente.txt")
             mlflow.log_text(json.dumps(result["state"], ensure_ascii=False, indent=2), "state.json")
 
+            logger.info("chat_success", extra={"extra": {"trace_id": trace_id, "user_id": req.user_id, "latency_ms": round(latency_ms, 2), "router_label": result["router"]["label"]}})
+            emit_event(req.user_id, "info", "chat_success", {"trace_id": trace_id, "latency_ms": round(latency_ms, 2), "router_label": result["router"]["label"]})
             return {"response": result["response"], "run_id": run_id, "trace_id": trace_id, "status": "success"}
 
     except Exception as e:
-        logger.error(f"❌ /chat error | trace_id={trace_id} | {e}")
+        logger.error("chat_error", extra={"extra": {"trace_id": trace_id, "error": str(e)}}, exc_info=True)
+        emit_event(req.user_id, "error", "chat_error", {"trace_id": trace_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.get("/events/{user_id}")
+async def events_endpoint(user_id: str, limit: int = Query(default=50, ge=1, le=500)):
+    if not rdb:
+        return {"events": []}
+    key = _events_key(user_id)
+    raw_items = rdb.lrange(key, 0, limit - 1)
+    if raw_items:
+        rdb.ltrim(key, len(raw_items), -1)
+    events = []
+    for item in raw_items:
+        try:
+            events.append(json.loads(item))
+        except Exception:
+            events.append({"level": "info", "event": "unparsed", "payload": {"raw": item}})
+    return {"events": events}
 
 @app.post("/feedback")
 async def feedback_endpoint(req: FeedbackRequest):
