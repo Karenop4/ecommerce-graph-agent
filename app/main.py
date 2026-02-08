@@ -1,4 +1,5 @@
 import json
+import re
 import uuid
 import time
 import logging
@@ -118,16 +119,47 @@ ROUTER_LABELS = [
 ]
 ROUTER_EMBEDS: Optional[List[List[float]]] = None
 
+INTENT_KEYWORDS = {
+    "browse_products": [r"\bbusco\b", r"\brecomiend", r"\bquiero ver\b", r"\bmostrar productos\b"],
+    "choose_option": [r"\bopci[oó]n\s*\d+", r"\bla segunda\b", r"\bla tercera\b", r"\bla primera\b"],
+    "add_to_cart": [r"\bagrega\b", r"\bañade\b", r"\bme llevo\b", r"\bponer en carrito\b"],
+    "remove_from_cart": [r"\bquita\b", r"\bremueve\b", r"\bsacar del carrito\b"],
+    "view_cart": [r"\bver carrito\b", r"\bmi carrito\b", r"\bque tengo\b"],
+    "purchase_or_stock": [r"\bstock\b", r"\bdisponibilidad\b", r"\bcomprar\b"],
+    "store_contact": [r"\bwhatsapp\b", r"\btel[eé]fono\b", r"\bdirecci[oó]n\b", r"\bhorario\b"],
+    "finalize_purchase": [r"\bfinalizar compra\b", r"\bproceder a compra\b", r"\bhaz la compra\b"],
+    "user_correction": [r"\best[aá] mal\b", r"\bcorrige\b", r"\bno es as[ií]\b"],
+}
+
 
 def cosine_sim(a, b) -> float:
     return float(sum(x * y for x, y in zip(a, b)))
 
 
-def seleccionar_funcion(query_vec_norm: List[float]) -> Tuple[str, float, List[float]]:
-    """Devuelve label + score + sims para debugging."""
+def seleccionar_funcion(query_text: str, query_vec_norm: List[float]) -> Tuple[str, float, List[float], str]:
+    """Devuelve label + score + sims + strategy para debugging."""
+    normalized = (query_text or "").strip().lower()
+
+    # 1) Regla por intención explícita (prioridad alta)
+    for label, patterns in INTENT_KEYWORDS.items():
+        for pattern in patterns:
+            if re.search(pattern, normalized):
+                sims = [0.0 for _ in ROUTER_LABELS]
+                if label in ROUTER_LABELS:
+                    sims[ROUTER_LABELS.index(label)] = 1.0
+                return label, 1.0, sims, "keyword"
+
+    # 2) Router semántico por similitud coseno
     sims = [cosine_sim(query_vec_norm, ROUTER_EMBEDS[i]) for i in range(len(ROUTER_LABELS))]
-    best_idx = max(range(len(sims)), key=lambda i: sims[i])
-    return ROUTER_LABELS[best_idx], float(sims[best_idx]), sims
+
+    # Penaliza respuesta_directa como fallback para evitar sesgo
+    adjusted_sims = list(sims)
+    if "respuesta_directa" in ROUTER_LABELS:
+        idx_direct = ROUTER_LABELS.index("respuesta_directa")
+        adjusted_sims[idx_direct] = adjusted_sims[idx_direct] - 0.08
+
+    best_idx = max(range(len(adjusted_sims)), key=lambda i: adjusted_sims[i])
+    return ROUTER_LABELS[best_idx], float(adjusted_sims[best_idx]), adjusted_sims, "semantic"
 
 
 @app.on_event("startup")
@@ -1240,7 +1272,7 @@ def ejecutar_pipeline(query_text: str, trace_id: str, user_id: str) -> Dict[str,
     logger.info(f"🧩 [FASE 1] ({trace_id}) dim={len(q_vec)}")
 
     logger.info(f"🧭 [FASE 2] ({trace_id}) Function Selection")
-    router_label, router_score, sims = seleccionar_funcion(q_vec)
+    router_label, router_score, sims, router_strategy = seleccionar_funcion(query_text, q_vec)
     ranked = sorted(
         [{"label": ROUTER_LABELS[i], "score": float(sims[i])} for i in range(len(ROUTER_LABELS))],
         key=lambda x: x["score"],
@@ -1254,6 +1286,7 @@ def ejecutar_pipeline(query_text: str, trace_id: str, user_id: str) -> Dict[str,
             "user_id": user_id,
             "selected_function": router_label,
             "selected_score": round(float(router_score), 4),
+            "selection_strategy": router_strategy,
             "top_candidates": top3,
         }},
     )
@@ -1265,6 +1298,7 @@ def ejecutar_pipeline(query_text: str, trace_id: str, user_id: str) -> Dict[str,
             "trace_id": trace_id,
             "selected_function": router_label,
             "selected_score": round(float(router_score), 4),
+            "selection_strategy": router_strategy,
             "top_candidates": top3,
         },
     )
@@ -1287,7 +1321,7 @@ def ejecutar_pipeline(query_text: str, trace_id: str, user_id: str) -> Dict[str,
 
     return {
         "response": response,
-        "router": {"label": router_label, "score": router_score, "sims": sims},
+        "router": {"label": router_label, "score": router_score, "sims": sims, "strategy": router_strategy},
         "plan": plan,
         "tool_results": tool_results,
         "state": state_after,
