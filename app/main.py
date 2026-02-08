@@ -1051,6 +1051,13 @@ def ejecutar_plan(plan: Dict[str, Any], user_id: str, trace_id: str, initial_res
     """Ejecuta cada step del plan y emite eventos para frontend."""
     results = list(initial_results or [])
     steps = plan.get("steps", [])
+    emit_event(user_id, "info", "queue_execution_started", {
+        "trace_id": trace_id,
+        "start_index": start_index,
+        "total_steps": len(steps),
+        "already_completed": len(results),
+    })
+
     for idx in range(start_index, len(steps)):
         step = steps[idx]
         human_idx = idx + 1
@@ -1062,49 +1069,67 @@ def ejecutar_plan(plan: Dict[str, Any], user_id: str, trace_id: str, initial_res
             "total_steps": len(steps),
             "tool": tool_name,
             "args": args,
+            "queue_progress_before": f"{idx}/{len(steps)}",
         })
 
-        if tool_name == "buscar_productos":
-            out = buscar_productos.invoke(args)
-        elif tool_name == "seleccionar_opcion":
-            out = seleccionar_opcion.invoke(args)
-        elif tool_name == "agregar_al_carrito":
-            out = agregar_al_carrito.invoke(args)
-        elif tool_name == "remover_del_carrito":
-            out = remover_del_carrito.invoke(args)
-        elif tool_name == "ver_carrito":
-            out = ver_carrito.invoke(args)
-        elif tool_name == "vaciar_carrito":
-            out = vaciar_carrito.invoke(args)
-        elif tool_name == "verificar_stock":
-            out = verificar_stock.invoke(args)
-        elif tool_name == "verificar_stock_carrito":
-            out = verificar_stock_carrito.invoke(args)
-        elif tool_name == "obtener_contacto_tienda":
-            out = obtener_contacto_tienda.invoke(args)
-        elif tool_name == "finalizar_compra":
-            out = finalizar_compra.invoke(args)
-        elif tool_name == "registrar_correccion":
-            out = registrar_correccion.invoke(args)
-        elif tool_name == "buscar_relaciones_grafo":
-            out = buscar_relaciones_grafo.invoke(args)
-        else:
-            out = f"Tool desconocida: {tool_name}"
+        try:
+            if tool_name == "buscar_productos":
+                out = buscar_productos.invoke(args)
+            elif tool_name == "seleccionar_opcion":
+                out = seleccionar_opcion.invoke(args)
+            elif tool_name == "agregar_al_carrito":
+                out = agregar_al_carrito.invoke(args)
+            elif tool_name == "remover_del_carrito":
+                out = remover_del_carrito.invoke(args)
+            elif tool_name == "ver_carrito":
+                out = ver_carrito.invoke(args)
+            elif tool_name == "vaciar_carrito":
+                out = vaciar_carrito.invoke(args)
+            elif tool_name == "verificar_stock":
+                out = verificar_stock.invoke(args)
+            elif tool_name == "verificar_stock_carrito":
+                out = verificar_stock_carrito.invoke(args)
+            elif tool_name == "obtener_contacto_tienda":
+                out = obtener_contacto_tienda.invoke(args)
+            elif tool_name == "finalizar_compra":
+                out = finalizar_compra.invoke(args)
+            elif tool_name == "registrar_correccion":
+                out = registrar_correccion.invoke(args)
+            elif tool_name == "buscar_relaciones_grafo":
+                out = buscar_relaciones_grafo.invoke(args)
+            else:
+                out = f"Tool desconocida: {tool_name}"
 
-        results.append({"tool": tool_name, "args": args, "output": out})
-        emit_event(user_id, "info", "queue_step_done", {
-            "trace_id": trace_id,
-            "step": human_idx,
-            "total_steps": len(steps),
-            "tool": tool_name,
-            "output_len": len(str(out)),
-        })
+            results.append({"tool": tool_name, "args": args, "output": out})
+            emit_event(user_id, "info", "queue_step_done", {
+                "trace_id": trace_id,
+                "step": human_idx,
+                "total_steps": len(steps),
+                "tool": tool_name,
+                "output_len": len(str(out)),
+                "queue_progress_after": f"{human_idx}/{len(steps)}",
+            })
+        except Exception as step_error:
+            emit_event(user_id, "error", "queue_step_error", {
+                "trace_id": trace_id,
+                "step": human_idx,
+                "total_steps": len(steps),
+                "tool": tool_name,
+                "error": str(step_error),
+            })
+            raise
 
+    emit_event(user_id, "info", "queue_execution_finished", {
+        "trace_id": trace_id,
+        "executed_steps": len(steps) - start_index,
+        "total_results": len(results),
+    })
     return results
 
 
 def ejecutar_o_reanudar_cola(plan: Dict[str, Any], user_id: str, trace_id: str) -> List[Dict[str, Any]]:
     pending = get_pending_queue(user_id)
+    emit_event(user_id, "info", "queue_orchestrator_enter", {"trace_id": trace_id, "has_pending": bool(pending)})
     if pending and pending.get("steps"):
         emit_event(user_id, "warning", "queue_resume_detected", {
             "previous_trace_id": pending.get("trace_id"),
@@ -1119,6 +1144,7 @@ def ejecutar_o_reanudar_cola(plan: Dict[str, Any], user_id: str, trace_id: str) 
             start_index=int(pending.get("next_index", 0)),
         )
         clear_queue(user_id)
+        emit_event(user_id, "info", "queue_resume_cleared", {"trace_id": pending.get("trace_id", trace_id)})
         emit_event(user_id, "info", "queue_resume_completed", {
             "resumed_steps": len(resumed_results),
             "trace_id": pending.get("trace_id", trace_id),
@@ -1131,6 +1157,7 @@ def ejecutar_o_reanudar_cola(plan: Dict[str, Any], user_id: str, trace_id: str) 
         "results": [],
     }
     save_queue(user_id, queue_data)
+    emit_event(user_id, "info", "queue_snapshot_saved", {"trace_id": trace_id, "next_index": queue_data["next_index"], "results_saved": len(queue_data["results"])})
     emit_event(user_id, "info", "queue_enqueued", {
         "trace_id": trace_id,
         "total_steps": len(queue_data["steps"]),
@@ -1141,6 +1168,7 @@ def ejecutar_o_reanudar_cola(plan: Dict[str, Any], user_id: str, trace_id: str) 
     for idx in range(len(steps)):
         queue_data["next_index"] = idx
         save_queue(user_id, queue_data)
+        emit_event(user_id, "info", "queue_progress_checkpoint", {"trace_id": trace_id, "next_index": idx, "total_steps": len(steps)})
 
         partial = ejecutar_plan(
             {"steps": steps[idx:idx+1]},
@@ -1152,9 +1180,11 @@ def ejecutar_o_reanudar_cola(plan: Dict[str, Any], user_id: str, trace_id: str) 
             queue_data["results"].append(partial[0])
             queue_data["next_index"] = idx + 1
             save_queue(user_id, queue_data)
+            emit_event(user_id, "info", "queue_snapshot_saved", {"trace_id": trace_id, "next_index": idx + 1, "results_saved": len(queue_data["results"])})
             results.append(partial[0])
 
     clear_queue(user_id)
+    emit_event(user_id, "info", "queue_cleared", {"trace_id": trace_id})
     emit_event(user_id, "info", "queue_completed", {
         "trace_id": trace_id,
         "total_steps": len(steps),
@@ -1211,7 +1241,33 @@ def ejecutar_pipeline(query_text: str, trace_id: str, user_id: str) -> Dict[str,
 
     logger.info(f"🧭 [FASE 2] ({trace_id}) Function Selection")
     router_label, router_score, sims = seleccionar_funcion(q_vec)
-    logger.info(f"🧭 [FASE 2] ({trace_id}) Router='{router_label}' score={router_score:.4f}")
+    ranked = sorted(
+        [{"label": ROUTER_LABELS[i], "score": float(sims[i])} for i in range(len(ROUTER_LABELS))],
+        key=lambda x: x["score"],
+        reverse=True,
+    )
+    top3 = ranked[:3]
+    logger.info(
+        "function_selection_result",
+        extra={"extra": {
+            "trace_id": trace_id,
+            "user_id": user_id,
+            "selected_function": router_label,
+            "selected_score": round(float(router_score), 4),
+            "top_candidates": top3,
+        }},
+    )
+    emit_event(
+        user_id,
+        "info",
+        "function_selected",
+        {
+            "trace_id": trace_id,
+            "selected_function": router_label,
+            "selected_score": round(float(router_score), 4),
+            "top_candidates": top3,
+        },
+    )
 
     update_state(user_id, {"last_intent": router_label})
 
