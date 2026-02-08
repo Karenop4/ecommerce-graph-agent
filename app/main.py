@@ -1,8 +1,8 @@
-import os
 import json
 import uuid
 import time
 import logging
+from time import perf_counter
 from typing import Any, Dict, List, Optional, Tuple
 
 import mlflow
@@ -10,7 +10,6 @@ import langchain
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
 
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
@@ -22,21 +21,17 @@ from sentence_transformers import SentenceTransformer
 
 import redis
 
+from core.config import load_settings
+from core.logging_utils import setup_structured_logging
+from core.guards import is_off_topic_query, off_topic_response
+from core.graph_search import buscar_en_grafo, format_graph_search_results
 
 # ----------------------------------------------------------------------
 # 0) CONFIG
 # ----------------------------------------------------------------------
 langchain.debug = True
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    datefmt="%H:%M:%S",
-)
-logger = logging.getLogger("AGENTE_BACKEND")
-
-load_dotenv(dotenv_path="../.env")
-load_dotenv(dotenv_path=".env")
+logger = setup_structured_logging()
+settings = load_settings()
 
 app = FastAPI(title="Agente E-Commerce Conversacional + Redis (Planner + Logs)")
 
@@ -48,20 +43,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY = settings.openai_api_key
+NEO4J_URI = settings.neo4j_uri
+NEO4J_AUTH = settings.neo4j_auth
+REDIS_URL = settings.redis_url
+REDIS_TTL_SECONDS = settings.redis_ttl_seconds
 
-NEO4J_URI = os.getenv("NEO4J_URI")
-NEO4J_AUTH = (os.getenv("NEO4J_USER", "neo4j"), os.getenv("NEO4J_PASSWORD"))
+mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
+mlflow.set_experiment(settings.mlflow_experiment)
 
-# En Docker suele ser: redis://redis:6379/0
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-REDIS_TTL_SECONDS = int(os.getenv("REDIS_TTL_SECONDS", "86400"))  # 24h
-
-tracking_uri = os.getenv("MLFLOW_TRACKING_URI") or "http://localhost:5000"
-mlflow.set_tracking_uri(tracking_uri)
-mlflow.set_experiment("Agente_Produccion_Conversacional_Redis")
-
-logger.info(f"OPENAI_API_KEY loaded? {'YES' if OPENAI_API_KEY else 'NO'}")
+logger.info("config_loaded", extra={"extra": {"openai_api_key_loaded": bool(OPENAI_API_KEY), "neo4j_uri": NEO4J_URI, "redis_url": REDIS_URL}})
 
 # Recursos globales inicializados en startup (no en import)
 embedder: Optional[SentenceTransformer] = None
@@ -872,6 +863,14 @@ def finalizar_compra(tienda: str = "", user_id: str = "anonimo") -> str:
     )
 
 
+@tool
+def buscar_relaciones_grafo(termino: str, user_id: str = "anonimo") -> str:
+    """Búsqueda textual simple sobre nodos del grafo para diagnóstico y soporte."""
+    logger.info("tool_buscar_relaciones_grafo", extra={"extra": {"user_id": user_id, "termino": termino}})
+    rows = buscar_en_grafo(driver, termino=termino, limite=5)
+    return format_graph_search_results(rows)
+
+
 TOOLS = [
     buscar_productos,
     seleccionar_opcion,
@@ -884,6 +883,7 @@ TOOLS = [
     obtener_contacto_tienda,
     finalizar_compra,
     registrar_correccion,
+    buscar_relaciones_grafo,
 ]
 
 
@@ -933,6 +933,8 @@ Reglas conversacionales:
 - Corrección ("está mal", "no es así", "el precio real", "corrige") =>
   registrar_correccion(entidad="auto", correccion="...").
 
+- Si el usuario pide buscar relaciones en el grafo, nodos o estructura => buscar_relaciones_grafo(termino, user_id).
+
 - Si no necesitas tools => {"steps":[]}
 
 - Si el usuario pide "dónde comprar" o "muéstrame dónde", responde con:
@@ -963,6 +965,7 @@ Tools válidas:
 - obtener_contacto_tienda(nombre_tienda, user_id)
 - finalizar_compra(tienda, user_id)
 - registrar_correccion(entidad, correccion, user_id)
+- buscar_relaciones_grafo(termino, user_id)
 """
 
 
@@ -1024,6 +1027,8 @@ def ejecutar_plan(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
             out = finalizar_compra.invoke(args)
         elif tool_name == "registrar_correccion":
             out = registrar_correccion.invoke(args)
+        elif tool_name == "buscar_relaciones_grafo":
+            out = buscar_relaciones_grafo.invoke(args)
         else:
             out = f"Tool desconocida: {tool_name}"
 
@@ -1127,25 +1132,33 @@ class FeedbackRequest(BaseModel):
 @app.post("/chat")
 async def chat_endpoint(req: ChatRequest):
     trace_id = str(uuid.uuid4())[:8]
-    logger.info(f"🌐 [HTTP] /chat | trace_id={trace_id} | user_id={req.user_id} | query='{req.query}'")
+    logger.info("chat_request", extra={"extra": {"trace_id": trace_id, "user_id": req.user_id, "query": req.query}})
 
+    if is_off_topic_query(req.query):
+        logger.info("chat_off_topic_filtered", extra={"extra": {"trace_id": trace_id, "user_id": req.user_id}})
+        return {"response": off_topic_response(), "run_id": None, "trace_id": trace_id, "status": "filtered"}
+
+    start = perf_counter()
     try:
         with mlflow.start_run() as run:
             run_id = run.info.run_id
             result = ejecutar_pipeline(req.query, trace_id, req.user_id)
+            latency_ms = (perf_counter() - start) * 1000
 
             mlflow.log_param("user_id", req.user_id)
             mlflow.log_param("trace_id", trace_id)
             mlflow.log_param("router_label", result["router"]["label"])
             mlflow.log_metric("router_score", float(result["router"]["score"]))
+            mlflow.log_metric("latency_ms", float(latency_ms))
             mlflow.log_text(json.dumps(result["plan"], ensure_ascii=False, indent=2), "plan.json")
             mlflow.log_text(result["response"], "respuesta_agente.txt")
             mlflow.log_text(json.dumps(result["state"], ensure_ascii=False, indent=2), "state.json")
 
+            logger.info("chat_success", extra={"extra": {"trace_id": trace_id, "user_id": req.user_id, "latency_ms": round(latency_ms, 2), "router_label": result["router"]["label"]}})
             return {"response": result["response"], "run_id": run_id, "trace_id": trace_id, "status": "success"}
 
     except Exception as e:
-        logger.error(f"❌ /chat error | trace_id={trace_id} | {e}")
+        logger.error("chat_error", extra={"extra": {"trace_id": trace_id, "error": str(e)}}, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
