@@ -7,17 +7,17 @@ services:
       - "7474:7474" # HTTP
       - "7687:7687" # Bolt
     environment:
-      - NEO4J_AUTH=${NEO4J_USER}/${NEO4J_PASSWORD}
+      #- NEO4J_AUTH=${NEO4J_USER}/${NEO4J_PASSWORD}
       - NEO4J_dbms_security_procedures_unrestricted=apoc.*
     volumes:
       - neo4j_data_vol:/data
 
-  # --- NUEVO: REDIS (estado conversacional) ---
+  # --- REDIS (estado conversacional) ---
   redis:
     image: redis:7
     container_name: redis_state
     ports:
-      - "6379:6379"
+      - "6380:6379"
     # opcional: persistencia (si quieres que no se borre al reiniciar)
     volumes:
       - ./redis_data:/data

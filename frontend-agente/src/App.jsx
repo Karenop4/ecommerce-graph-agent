@@ -5,6 +5,7 @@ import { ArrowUp, User, Bot, ThumbsUp, ThumbsDown, Send } from "lucide-react";
 import "./App.css";
 
 const API_URL = "http://localhost:8000";
+const USER_ID = "usuario_demo";
 
 function App() {
   const [messages, setMessages] = useState([
@@ -31,10 +32,30 @@ function App() {
 
   useEffect(() => {
     if (activeFeedback) {
-      // pequeño delay para asegurar que el textarea ya se renderizó
       setTimeout(() => feedbackTextareaRef.current?.focus(), 0);
     }
   }, [activeFeedback]);
+
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      try {
+        const res = await axios.get(`${API_URL}/events/${USER_ID}`, {
+          params: { limit: 100 },
+        });
+        const events = res.data?.events || [];
+        events.forEach((evt) => {
+          console.log(
+            `[BACKEND][${evt.level || "info"}] ${evt.event || "event"}`,
+            evt.payload || {}
+          );
+        });
+      } catch (error) {
+        console.error("[BACKEND][events] polling_error", error?.message || error);
+      }
+    }, 1500);
+
+    return () => clearInterval(interval);
+  }, []);
 
   const sendMessage = async () => {
     if (!input.trim()) return;
@@ -44,17 +65,18 @@ function App() {
     setInput("");
     setLoading(true);
 
-    // Si había un feedback abierto, ciérralo al mandar otro mensaje
     setActiveFeedback(null);
     setCommentText("");
 
     try {
+      console.log("[FRONTEND] sending_chat", { query: userMessage.content, user_id: USER_ID });
       const response = await axios.post(`${API_URL}/chat`, {
         query: userMessage.content,
-        user_id: "usuario_demo",
+        user_id: USER_ID,
       });
 
       const data = response.data;
+      console.log("[FRONTEND] chat_response", data);
 
       const botMessage = {
         role: "bot",
@@ -65,7 +87,7 @@ function App() {
 
       setMessages((prev) => [...prev, botMessage]);
     } catch (error) {
-      console.error("Error:", error);
+      console.error("[FRONTEND] chat_error", error);
       setMessages((prev) => [
         ...prev,
         { role: "bot", content: "⚠️ Error de conexión con el servidor.", isError: true },
@@ -79,8 +101,9 @@ function App() {
     try {
       const cleanComment = (customComment ?? "").trim();
       const finalComment =
-        score === 1 ? "Usuario satisfecho" : (cleanComment || "Error reportado");
+        score === 1 ? "Usuario satisfecho" : cleanComment || "Error reportado";
 
+      console.log("[FRONTEND] sending_feedback", { runId, score, finalComment });
       await axios.post(`${API_URL}/feedback`, {
         run_id: runId,
         score,
@@ -100,7 +123,7 @@ function App() {
         alert("¡Gracias! He guardado tu corrección en mi memoria para la próxima vez.");
       }
     } catch (error) {
-      console.error("Error enviando feedback:", error);
+      console.error("[FRONTEND] feedback_error", error);
     }
   };
 
