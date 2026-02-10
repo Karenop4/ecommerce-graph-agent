@@ -17,6 +17,8 @@ const GRAPH_SEARCH_TOOLS = new Set([
 
 const GRAPH_CANVAS = { width: 320, height: 220 };
 
+const normalizeGraphId = (value) => String(value ?? "");
+
 function App() {
   const [messages, setMessages] = useState([
     {
@@ -157,15 +159,35 @@ function App() {
     // Evento de paso de búsqueda BFS (nuevo - animación progresiva)
     if (evt.event === "graph_search_step") {
       const depth = payload.depth ?? 0;
-      const nodeIds = Array.isArray(payload.node_ids) ? payload.node_ids : [];
-      const edges = Array.isArray(payload.edges) ? payload.edges : [];
-      const cumulativeNodes = Array.isArray(payload.cumulative_nodes) ? payload.cumulative_nodes : nodeIds;
+      const nodeIds = Array.isArray(payload.node_ids)
+        ? payload.node_ids.map(normalizeGraphId)
+        : [];
+      const edges = Array.isArray(payload.edges)
+        ? payload.edges.map((edge) => ({
+            from: normalizeGraphId(edge.from),
+            to: normalizeGraphId(edge.to),
+          }))
+        : [];
+      const cumulativeNodes = Array.isArray(payload.cumulative_nodes)
+        ? payload.cumulative_nodes.map(normalizeGraphId)
+        : nodeIds;
       
       addGraphStep(`BFS depth=${depth}: ${nodeIds.length} nodos`, depth === 0 ? "info" : "ok");
       
       setSearchDepth(depth);
       setHighlightedNodeIds(cumulativeNodes);
-      setHighlightedEdges((prev) => [...prev, ...edges]);
+      setHighlightedEdges((prev) => {
+        const seen = new Set(prev.map((edge) => `${edge.from}|${edge.to}`));
+        const merged = [...prev];
+        edges.forEach((edge) => {
+          const key = `${edge.from}|${edge.to}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            merged.push(edge);
+          }
+        });
+        return merged;
+      });
       setGraphMeta((prev) => ({
         ...prev,
         status: "active",
@@ -180,8 +202,15 @@ function App() {
     
     // Evento de búsqueda completada
     if (evt.event === "graph_search_complete") {
-      const nodeIds = Array.isArray(payload.node_ids) ? payload.node_ids : [];
-      const edges = Array.isArray(payload.edges) ? payload.edges : [];
+      const nodeIds = Array.isArray(payload.node_ids)
+        ? payload.node_ids.map(normalizeGraphId)
+        : [];
+      const edges = Array.isArray(payload.edges)
+        ? payload.edges.map((edge) => ({
+            from: normalizeGraphId(edge.from),
+            to: normalizeGraphId(edge.to),
+          }))
+        : [];
       
       addGraphStep(`✓ Búsqueda completa: ${nodeIds.length} nodos`, "ok");
       setHighlightedNodeIds(nodeIds);
@@ -206,7 +235,9 @@ function App() {
 
     // Evento legacy (por compatibilidad)
     if (evt.event === "graph_search_result") {
-      const nodeIds = Array.isArray(payload.node_ids) ? payload.node_ids : [];
+      const nodeIds = Array.isArray(payload.node_ids)
+        ? payload.node_ids.map(normalizeGraphId)
+        : [];
       setHighlightedNodeIds(nodeIds);
       if (highlightTimerRef.current) {
         clearTimeout(highlightTimerRef.current);
@@ -354,9 +385,9 @@ function App() {
         y: Math.round(centerY + Math.sin(angle) * radius),
       };
     });
-    const nodeMap = new Map(positionedNodes.map((node) => [node.id, node]));
+    const nodeMap = new Map(positionedNodes.map((node) => [normalizeGraphId(node.id), node]));
     const edges = (graphData.edges || []).filter(
-      (edge) => nodeMap.has(edge.from) && nodeMap.has(edge.to)
+      (edge) => nodeMap.has(normalizeGraphId(edge.from)) && nodeMap.has(normalizeGraphId(edge.to))
     );
     return { width, height, nodes: positionedNodes, edges };
   }, [graphData]);
@@ -366,8 +397,10 @@ function App() {
   const highlightedEdgeSet = useMemo(() => {
     const set = new Set();
     highlightedEdges.forEach((e) => {
-      set.add(`${e.from}|${e.to}`);
-      set.add(`${e.to}|${e.from}`); // bidireccional
+      const from = normalizeGraphId(e.from);
+      const to = normalizeGraphId(e.to);
+      set.add(`${from}|${to}`);
+      set.add(`${to}|${from}`); // bidireccional
     });
     return set;
   }, [highlightedEdges]);
@@ -496,15 +529,17 @@ function App() {
           >
             {graphLayout.edges.map((edge) => {
               const isActive = isScanning;
-              const edgeKey = `${edge.from}|${edge.to}`;
+              const edgeFrom = normalizeGraphId(edge.from);
+              const edgeTo = normalizeGraphId(edge.to);
+              const edgeKey = `${edgeFrom}|${edgeTo}`;
               const isEdgeHighlighted = highlightedEdgeSet.has(edgeKey);
-              const isNodeHighlighted = highlightedSet.has(edge.from) || highlightedSet.has(edge.to);
-              const source = graphLayout.nodes.find((n) => n.id === edge.from);
-              const target = graphLayout.nodes.find((n) => n.id === edge.to);
+              const isNodeHighlighted = highlightedSet.has(edgeFrom) || highlightedSet.has(edgeTo);
+              const source = graphLayout.nodes.find((n) => normalizeGraphId(n.id) === edgeFrom);
+              const target = graphLayout.nodes.find((n) => normalizeGraphId(n.id) === edgeTo);
               if (!source || !target) return null;
               return (
                 <line
-                  key={`${edge.from}-${edge.to}`}
+                  key={`${edgeFrom}-${edgeTo}`}
                   x1={source.x}
                   y1={source.y}
                   x2={target.x}
@@ -516,7 +551,7 @@ function App() {
 
             {graphLayout.nodes.map((node, idx) => {
               const isActive = isScanning;
-              const isHighlighted = highlightedSet.has(node.id);
+              const isHighlighted = highlightedSet.has(normalizeGraphId(node.id));
               const isSeed = idx === 0 || (searchDepth === 0 && isHighlighted);
               return (
                 <g 

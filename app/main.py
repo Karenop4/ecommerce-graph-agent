@@ -120,6 +120,7 @@ ROUTER_LABELS = [
     "respuesta_directa",
 ]
 ROUTER_EMBEDS: Optional[List[List[float]]] = None
+DIRECT_RESPONSE_MARGIN = 0.06
 
 INTENT_KEYWORDS = {
     "browse_products": [r"\bbusco\b", r"\brecomiend", r"\bquiero ver\b", r"\bmostrar productos\b"],
@@ -161,6 +162,20 @@ def seleccionar_funcion(query_text: str, query_vec_norm: List[float]) -> Tuple[s
         adjusted_sims[idx_direct] = adjusted_sims[idx_direct] - 0.08
 
     best_idx = max(range(len(adjusted_sims)), key=lambda i: adjusted_sims[i])
+
+    # Si respuesta_directa no gana con margen claro, preferimos el siguiente intent
+    if ROUTER_LABELS[best_idx] == "respuesta_directa":
+        ranked = sorted(
+            [(i, float(adjusted_sims[i])) for i in range(len(adjusted_sims))],
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        if len(ranked) > 1:
+            _, best_score = ranked[0]
+            second_idx, second_score = ranked[1]
+            if (best_score - second_score) <= DIRECT_RESPONSE_MARGIN:
+                return ROUTER_LABELS[second_idx], second_score, adjusted_sims, "semantic_margin"
+
     return ROUTER_LABELS[best_idx], float(adjusted_sims[best_idx]), adjusted_sims, "semantic"
 
 
