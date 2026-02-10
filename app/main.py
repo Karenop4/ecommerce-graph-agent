@@ -769,6 +769,18 @@ def agregar_al_carrito(producto_ref: str, qty: int = 1, user_id: str = "anonimo"
                 id=ref.upper()
             ).single()
         if not prod:
+            prod = session.run(
+                """
+                MATCH (p:Producto)
+                WHERE toLower(p.nombre) CONTAINS toLower($ref)
+                RETURN p.id AS id, p.nombre AS nombre, p.precio AS precio,
+                       size(p.nombre) AS len_nombre
+                ORDER BY len_nombre ASC
+                LIMIT 1
+                """,
+                ref=ref,
+            ).single()
+        if not prod:
             v = embedder.encode(ref).tolist()
             prod = session.run("""
                 CALL db.index.vector.queryNodes('productos_embeddings', 1, $vector)
@@ -994,31 +1006,62 @@ def verificar_stock_carrito(tienda: str = "", user_id: str = "anonimo") -> str:
 def obtener_contacto_tienda(nombre_tienda: str = "", user_id: str = "anonimo") -> str:
     """Obtiene teléfono/WhatsApp/horario/dirección de una tienda desde Neo4j."""
     state = get_state(user_id)
-    if not (nombre_tienda or "").strip():
+
+    requested_name = (nombre_tienda or "").strip()
+    lowered_requested = requested_name.lower()
+    asks_all_stores = (
+        not requested_name
+        or any(tok in lowered_requested for tok in ["todos", "todas", "locales", "tiendas", "sucursales"])
+    )
+
+    if not asks_all_stores and not requested_name:
         if state.get("selected_store"):
-            nombre_tienda = state["selected_store"]
+            requested_name = state["selected_store"]
         else:
             return "¿De qué tienda? Opciones: Tienda Central, Sucursal Norte, Venta Online."
 
-    logger.info(f"🛠️ [TOOL] obtener_contacto_tienda | tienda='{nombre_tienda}'")
+    logger.info(f"🛠️ [TOOL] obtener_contacto_tienda | tienda='{requested_name}' all={asks_all_stores}")
 
     with driver.session() as session:
-        row = session.run("""
-            MATCH (t:Tienda)
-            WHERE toLower(t.nombre) CONTAINS toLower($name)
-            RETURN t.nombre AS nombre, t.canal AS canal, t.telefono AS telefono,
-                   t.whatsapp AS whatsapp, t.direccion AS direccion, t.horario AS horario
-            LIMIT 1
-        """, name=nombre_tienda).single()
+        if asks_all_stores:
+            rows = [dict(r) for r in session.run("""
+                MATCH (t:Tienda)
+                RETURN t.nombre AS nombre, t.canal AS canal, t.telefono AS telefono,
+                       t.whatsapp AS whatsapp, t.direccion AS direccion, t.horario AS horario
+                ORDER BY t.nombre ASC
+            """)]
+        else:
+            rows = [dict(r) for r in session.run("""
+                MATCH (t:Tienda)
+                WHERE toLower(t.nombre) CONTAINS toLower($name)
+                RETURN t.nombre AS nombre, t.canal AS canal, t.telefono AS telefono,
+                       t.whatsapp AS whatsapp, t.direccion AS direccion, t.horario AS horario
+                ORDER BY t.nombre ASC
+                LIMIT 1
+            """, name=requested_name)]
 
-    if not row:
+    if not rows:
         return "No encontré esa tienda. Opciones: Tienda Central, Sucursal Norte, Venta Online."
 
-    update_state(user_id, {"selected_store": row["nombre"], "stage": "contact"})
+    selected_for_state = rows[0]["nombre"]
+    update_state(user_id, {"selected_store": selected_for_state, "stage": "contact"})
 
     def safe(v):
         return v if v not in (None, "") else "N/A"
 
+    if asks_all_stores:
+        lines = ["📍 Locales disponibles:"]
+        for row in rows:
+            lines.append(
+                f"- {row['nombre']} ({safe(row.get('canal'))}) | "
+                f"Tel: {safe(row.get('telefono'))} | "
+                f"WhatsApp: {safe(row.get('whatsapp'))} | "
+                f"Horario: {safe(row.get('horario'))} | "
+                f"Dirección: {safe(row.get('direccion'))}"
+            )
+        return "\n".join(lines)
+
+    row = rows[0]
     return (
         f"📍 {row['nombre']} ({safe(row.get('canal'))})\n"
         f"☎️ Tel: {safe(row.get('telefono'))}\n"
@@ -1695,33 +1738,45 @@ def _friendly_products_reply(query_text: str, output: str) -> str:
 def redactar_respuesta(query_text: str, tool_results: List[Dict[str, Any]], state: Dict[str, Any]) -> str:
     """Redacta respuesta final usando el contexto de herramientas."""
     if tool_results:
-        outputs: List[str] = []
-        seen = set()
+        cleaned_results: List[Dict[str, Any]] = []
         for r in tool_results:
             out = str(r.get("output", "")).strip()
-            if not out or out in seen:
+            if not out:
                 continue
-            seen.add(out)
-            outputs.append(out)
+            cleaned_results.append({"tool": str(r.get("tool", "")), "output": out})
 
-        if outputs:
-            tools = [str(r.get("tool", "")) for r in tool_results]
-            merged = _naturalize_generic_text("\n".join(outputs))
+        if cleaned_results:
+            # Si hubo múltiples acciones de carrito en una misma ejecución,
+            # mantener el mensaje de acción + una sola vista final del carrito.
+            cart_tools = {"agregar_al_carrito", "remover_del_carrito", "vaciar_carrito", "ver_carrito"}
+            has_non_view_cart = any(r["tool"] in cart_tools - {"ver_carrito"} for r in cleaned_results)
+            if has_non_view_cart:
+                cleaned_results = [r for r in cleaned_results if r["tool"] != "ver_carrito"]
 
-            if any(t == "buscar_productos" for t in tools):
-                return _friendly_products_reply(query_text, outputs[0])
+            deduped: List[Dict[str, Any]] = []
+            seen_pairs = set()
+            for r in cleaned_results:
+                key = (r["tool"], r["output"])
+                if key in seen_pairs:
+                    continue
+                seen_pairs.add(key)
+                deduped.append(r)
 
-            if any(t in {"agregar_al_carrito", "remover_del_carrito", "ver_carrito", "vaciar_carrito"} for t in tools):
-                return (
-                    "¡Listo! 😊 Ya actualicé tu carrito:\n\n"
-                    f"{merged}\n\n"
-                    "Cuando quieras, te ayudo a revisar stock o continuar con la compra."
-                )
+            contexto_tools = "\n\n".join(
+                f"[{r['tool']}]\n{_naturalize_generic_text(r['output'])}" for r in deduped
+            )
 
-            if any(t in {"verificar_stock", "verificar_stock_carrito", "obtener_contacto_tienda", "finalizar_compra"} for t in tools):
-                return "Perfecto 👍 Te comparto la información:\n\n" + merged
-
-            return f"¡Con gusto! 😊\n\n{merged}"
+            msg = llm.invoke([
+                SystemMessage(content=RESPONDER_SYSTEM),
+                HumanMessage(content=(
+                    "Reescribe de forma natural y breve para el usuario usando SOLO estos resultados "
+                    "de herramientas (no inventes datos, no cambies montos ni productos):\n\n"
+                    f"Consulta del usuario: {query_text}\n\n"
+                    f"Resultados tools:\n{contexto_tools}\n\n"
+                    "Entrega una sola respuesta final clara en español."
+                ))
+            ])
+            return str(msg.content).strip()
 
     contexto = ""
     for r in tool_results:
