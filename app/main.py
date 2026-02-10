@@ -336,6 +336,94 @@ def clear_queue(user_id: str) -> None:
         rdb.delete(_queue_key(user_id))
 
 
+def emit_graph_highlight_for_tool(user_id: str, tool_name: str, args: Dict[str, Any]) -> None:
+    """Emite highlights de grafo para cualquier tool (productos/tiendas/carrito)."""
+    if not driver:
+        return
+
+    state = get_state(user_id)
+    product_ids = set()
+    store_names = set()
+
+    selected_product_id = state.get("selected_product_id")
+    if selected_product_id:
+        product_ids.add(str(selected_product_id))
+
+    selected_store = state.get("selected_store")
+    if selected_store:
+        store_names.add(str(selected_store))
+
+    for item in state.get("cart_items", []) or []:
+        pid = item.get("id")
+        if pid:
+            product_ids.add(str(pid))
+
+    for item in state.get("last_candidates", []) or []:
+        pid = item.get("id")
+        if pid:
+            product_ids.add(str(pid))
+
+    for key in ("producto_ref", "id", "product_id"):
+        val = args.get(key)
+        if isinstance(val, str) and re.match(r"^[A-Za-z]\d+$", val.strip()):
+            product_ids.add(val.strip())
+
+    tienda_arg = args.get("tienda") or args.get("nombre_tienda")
+    if isinstance(tienda_arg, str) and tienda_arg.strip():
+        store_names.add(tienda_arg.strip())
+
+    if not product_ids and not store_names:
+        return
+
+    cypher = """
+    OPTIONAL MATCH (p:Producto)
+    WHERE p.id IN $product_ids
+    OPTIONAL MATCH (p)-[rp]-(pn)
+    WITH collect(DISTINCT p) AS ps,
+         collect(DISTINCT {from: elementId(p), to: elementId(pn), type: type(rp)}) AS p_edges,
+         collect(DISTINCT pn) AS p_neighbors
+    OPTIONAL MATCH (t:Tienda)
+    WHERE toLower(t.nombre) IN $store_names_lower
+    OPTIONAL MATCH (t)-[rt]-(tn)
+    RETURN
+      [n IN ps WHERE n IS NOT NULL | elementId(n)] +
+      [n IN p_neighbors WHERE n IS NOT NULL | elementId(n)] +
+      [n IN collect(DISTINCT t) WHERE n IS NOT NULL | elementId(n)] +
+      [n IN collect(DISTINCT tn) WHERE n IS NOT NULL | elementId(n)] AS node_ids,
+      [e IN p_edges WHERE e.from IS NOT NULL AND e.to IS NOT NULL] +
+      [e IN collect(DISTINCT {from: elementId(t), to: elementId(tn), type: type(rt)})
+       WHERE e.from IS NOT NULL AND e.to IS NOT NULL] AS edges
+    """
+
+    store_names_lower = [s.lower() for s in store_names]
+
+    try:
+        with driver.session() as session:
+            row = session.run(
+                cypher,
+                product_ids=list(product_ids),
+                store_names_lower=store_names_lower,
+            ).single()
+
+        if not row:
+            return
+
+        node_ids = list(dict.fromkeys(row.get("node_ids") or []))
+        edges = row.get("edges") or []
+        if not node_ids:
+            return
+
+        GRAPH_HIGHLIGHTS[user_id] = node_ids
+        emit_event(user_id, "info", "graph_search_complete", {
+            "source_tool": tool_name,
+            "node_ids": node_ids,
+            "edges": edges,
+            "total_depth": 1,
+        })
+    except Exception as e:
+        logger.warning(f"[GRAPH][HIGHLIGHT] no se pudo emitir highlight para {tool_name}: {e}")
+
+
 def normalize_ordinal_to_index(text: str) -> Optional[int]:
     """Convierte 'la segunda/2/tercera' a índice 0-based si aplica."""
     t = (text or "").lower().strip()
@@ -1229,6 +1317,9 @@ def ejecutar_plan(plan: Dict[str, Any], user_id: str, trace_id: str, initial_res
 
         try:
             out = _invoke_tool(tool_name, args)
+
+            if tool_name != "buscar_relaciones_grafo":
+                emit_graph_highlight_for_tool(user_id, tool_name, args)
 
             results.append({"tool": tool_name, "args": args, "output": out})
             emit_event(user_id, "info", "queue_step_done", {
