@@ -123,6 +123,20 @@ function App() {
     queuePulse(2, label, 440);
   };
 
+  const resetGraphHighlights = () => {
+    flowTimersRef.current.forEach((timer) => clearTimeout(timer));
+    flowTimersRef.current = [];
+
+    if (highlightTimerRef.current) {
+      clearTimeout(highlightTimerRef.current);
+      highlightTimerRef.current = null;
+    }
+
+    setSearchDepth(-1);
+    setHighlightedNodeIds([]);
+    setHighlightedEdges([]);
+  };
+
   const animateFlowFromSeed = (nodeIdsRaw, edgesRaw = []) => {
     const nodeIds = (Array.isArray(nodeIdsRaw) ? nodeIdsRaw : []).map(normalizeGraphId);
     const edges = (Array.isArray(edgesRaw) ? edgesRaw : []).map((edge) => ({
@@ -245,10 +259,12 @@ function App() {
 
       if (GRAPH_SEARCH_TOOLS.has(tool)) {
         // Limpiar highlights anteriores al iniciar nueva búsqueda
-        setHighlightedNodeIds([]);
-        setHighlightedEdges([]);
-        setSearchDepth(-1);
+        resetGraphHighlights();
         triggerGraphSearch(tool, payload.trace_id);
+      } else {
+        // Para tools no relacionadas con grafo, no mostrar nodos resaltados.
+        resetGraphHighlights();
+        setGraphMeta((prev) => ({ ...prev, status: "idle", currentDepth: -1, lastEvent: Date.now() }));
       }
       return;
     }
