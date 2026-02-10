@@ -4,7 +4,7 @@ import ReactMarkdown from "react-markdown";
 import { ArrowUp, User, Bot, ThumbsUp, ThumbsDown, Send } from "lucide-react";
 import "./App.css";
 
-const API_URL = "http://localhost:8000";
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 const USER_ID = "usuario_demo";
 
 const GRAPH_SEARCH_TOOLS = new Set([
@@ -16,6 +16,8 @@ const GRAPH_SEARCH_TOOLS = new Set([
 ]);
 
 const GRAPH_CANVAS = { width: 320, height: 220 };
+
+const normalizeGraphId = (value) => String(value ?? "");
 
 function App() {
   const [messages, setMessages] = useState([
@@ -51,6 +53,10 @@ function App() {
   const feedbackTextareaRef = useRef(null);
   const pulseTimersRef = useRef([]);
   const highlightTimerRef = useRef(null);
+  const flowTimersRef = useRef([]);
+  const lastEventsErrorRef = useRef(0);
+  const lastGraphErrorRef = useRef(0);
+  const backendDownRef = useRef(false);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -66,6 +72,8 @@ function App() {
     return () => {
       pulseTimersRef.current.forEach((timer) => clearTimeout(timer));
       pulseTimersRef.current = [];
+      flowTimersRef.current.forEach((timer) => clearTimeout(timer));
+      flowTimersRef.current = [];
       if (highlightTimerRef.current) {
         clearTimeout(highlightTimerRef.current);
       }
@@ -75,6 +83,18 @@ function App() {
   const addGraphStep = (text, level = "info") => {
     const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     setGraphSteps((prev) => [{ id, text, level }, ...prev].slice(0, 6));
+  };
+
+  const clearNonFunctionSteps = () => {
+    setGraphSteps((prev) => prev.filter((step) => step.text.startsWith("Function:")));
+  };
+
+  const setFunctionStep = (label) => {
+    const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    setGraphSteps((prev) => {
+      const withoutFunction = prev.filter((step) => !step.text.startsWith("Function:"));
+      return [{ id, text: `Function: ${label}`, level: "info" }, ...withoutFunction].slice(0, 6);
+    });
   };
 
   const queuePulse = (depth, label, delayMs = 0) => {
@@ -103,14 +123,108 @@ function App() {
     queuePulse(2, label, 440);
   };
 
+  const animateFlowFromSeed = (nodeIdsRaw, edgesRaw = []) => {
+    const nodeIds = (Array.isArray(nodeIdsRaw) ? nodeIdsRaw : []).map(normalizeGraphId);
+    const edges = (Array.isArray(edgesRaw) ? edgesRaw : []).map((edge) => ({
+      from: normalizeGraphId(edge.from),
+      to: normalizeGraphId(edge.to),
+      type: edge.type,
+    }));
+
+    if (!nodeIds.length) return;
+
+    flowTimersRef.current.forEach((timer) => clearTimeout(timer));
+    flowTimersRef.current = [];
+
+    const seed = nodeIds[0];
+    const adjacency = new Map();
+    edges.forEach((edge) => {
+      if (!adjacency.has(edge.from)) adjacency.set(edge.from, new Set());
+      if (!adjacency.has(edge.to)) adjacency.set(edge.to, new Set());
+      adjacency.get(edge.from).add(edge.to);
+      adjacency.get(edge.to).add(edge.from);
+    });
+
+    const bfsOrder = [seed];
+    const visited = new Set([seed]);
+    const queue = [seed];
+
+    while (queue.length) {
+      const current = queue.shift();
+      const neighbors = [...(adjacency.get(current) || new Set())];
+      neighbors.forEach((nb) => {
+        if (!visited.has(nb)) {
+          visited.add(nb);
+          bfsOrder.push(nb);
+          queue.push(nb);
+        }
+      });
+    }
+
+    nodeIds.forEach((id) => {
+      if (!visited.has(id)) {
+        visited.add(id);
+        bfsOrder.push(id);
+      }
+    });
+
+    setHighlightedNodeIds([]);
+    setHighlightedEdges([]);
+    setSearchDepth(0);
+    setGraphMeta((prev) => ({ ...prev, status: "active", currentDepth: 0, lastEvent: Date.now() }));
+
+    bfsOrder.forEach((nodeId, idx) => {
+      const timer = setTimeout(() => {
+        setSearchDepth(idx);
+        setGraphMeta((prev) => ({ ...prev, status: "active", currentDepth: idx, lastEvent: Date.now() }));
+        setHighlightedNodeIds((prev) => {
+          const merged = new Set(prev);
+          merged.add(nodeId);
+          return [...merged];
+        });
+        setHighlightedEdges((prev) => {
+          const highlightedNodes = new Set([...highlightedSetFromState(prev), nodeId]);
+          const seen = new Set(prev.map((e) => `${e.from}|${e.to}|${e.type || ""}`));
+          const merged = [...prev];
+          edges.forEach((edge) => {
+            if (!(highlightedNodes.has(edge.from) && highlightedNodes.has(edge.to))) return;
+            const key = `${edge.from}|${edge.to}|${edge.type || ""}`;
+            if (!seen.has(key)) {
+              seen.add(key);
+              merged.push(edge);
+            }
+          });
+          return merged;
+        });
+        queuePulse(idx, `flow-${idx}`, 0);
+      }, idx * 460);
+      flowTimersRef.current.push(timer);
+    });
+
+    const finishTimer = setTimeout(() => {
+      setSearchDepth(-1);
+      setGraphMeta((prev) => ({ ...prev, status: "idle", currentDepth: -1, lastEvent: Date.now() }));
+    }, bfsOrder.length * 460 + 500);
+    flowTimersRef.current.push(finishTimer);
+  };
+
+  const highlightedSetFromState = (edgesState) => {
+    const nodes = new Set();
+    edgesState.forEach((edge) => {
+      nodes.add(normalizeGraphId(edge.from));
+      nodes.add(normalizeGraphId(edge.to));
+    });
+    highlightedNodeIds.forEach((id) => nodes.add(normalizeGraphId(id)));
+    return nodes;
+  };
+
   const handleBackendEvent = (evt) => {
     if (!evt || !evt.event) return;
     const payload = evt.payload || {};
 
     if (evt.event === "function_selected") {
       const label = payload.selected_function || "?";
-      const score = payload.selected_score ?? "?";
-      addGraphStep(`Function: ${label} (${score})`);
+      setFunctionStep(label);
       setGraphMeta((prev) => ({
         ...prev,
         traceId: payload.trace_id || prev.traceId,
@@ -121,7 +235,7 @@ function App() {
 
     if (evt.event === "queue_step_start") {
       const tool = payload.tool || "tool";
-      addGraphStep(`Paso ${payload.step || "?"}: ${tool}`);
+      clearNonFunctionSteps();
       setGraphMeta((prev) => ({
         ...prev,
         activeTool: tool,
@@ -140,12 +254,10 @@ function App() {
     }
 
     if (evt.event === "queue_step_done") {
-      addGraphStep(`OK: ${payload.tool || "tool"}`, "ok");
       return;
     }
 
     if (evt.event === "queue_step_error") {
-      addGraphStep(`Error: ${payload.tool || "tool"}`, "error");
       setGraphMeta((prev) => ({ ...prev, status: "idle" }));
       return;
     }
@@ -157,15 +269,33 @@ function App() {
     // Evento de paso de búsqueda BFS (nuevo - animación progresiva)
     if (evt.event === "graph_search_step") {
       const depth = payload.depth ?? 0;
-      const nodeIds = Array.isArray(payload.node_ids) ? payload.node_ids : [];
-      const edges = Array.isArray(payload.edges) ? payload.edges : [];
-      const cumulativeNodes = Array.isArray(payload.cumulative_nodes) ? payload.cumulative_nodes : nodeIds;
-      
-      addGraphStep(`BFS depth=${depth}: ${nodeIds.length} nodos`, depth === 0 ? "info" : "ok");
+      const nodeIds = Array.isArray(payload.node_ids)
+        ? payload.node_ids.map(normalizeGraphId)
+        : [];
+      const edges = Array.isArray(payload.edges)
+        ? payload.edges.map((edge) => ({
+            from: normalizeGraphId(edge.from),
+            to: normalizeGraphId(edge.to),
+          }))
+        : [];
+      const cumulativeNodes = Array.isArray(payload.cumulative_nodes)
+        ? payload.cumulative_nodes.map(normalizeGraphId)
+        : nodeIds;
       
       setSearchDepth(depth);
       setHighlightedNodeIds(cumulativeNodes);
-      setHighlightedEdges((prev) => [...prev, ...edges]);
+      setHighlightedEdges((prev) => {
+        const seen = new Set(prev.map((edge) => `${edge.from}|${edge.to}`));
+        const merged = [...prev];
+        edges.forEach((edge) => {
+          const key = `${edge.from}|${edge.to}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            merged.push(edge);
+          }
+        });
+        return merged;
+      });
       setGraphMeta((prev) => ({
         ...prev,
         status: "active",
@@ -180,18 +310,17 @@ function App() {
     
     // Evento de búsqueda completada
     if (evt.event === "graph_search_complete") {
-      const nodeIds = Array.isArray(payload.node_ids) ? payload.node_ids : [];
-      const edges = Array.isArray(payload.edges) ? payload.edges : [];
+      const nodeIds = Array.isArray(payload.node_ids)
+        ? payload.node_ids.map(normalizeGraphId)
+        : [];
+      const edges = Array.isArray(payload.edges)
+        ? payload.edges.map((edge) => ({
+            from: normalizeGraphId(edge.from),
+            to: normalizeGraphId(edge.to),
+          }))
+        : [];
       
-      addGraphStep(`✓ Búsqueda completa: ${nodeIds.length} nodos`, "ok");
-      setHighlightedNodeIds(nodeIds);
-      setHighlightedEdges(edges);
-      setSearchDepth(-1);
-      setGraphMeta((prev) => ({
-        ...prev,
-        status: "idle",
-        currentDepth: -1,
-      }));
+      animateFlowFromSeed(nodeIds, edges);
       
       // Limpiar highlights después de un tiempo
       if (highlightTimerRef.current) {
@@ -206,7 +335,9 @@ function App() {
 
     // Evento legacy (por compatibilidad)
     if (evt.event === "graph_search_result") {
-      const nodeIds = Array.isArray(payload.node_ids) ? payload.node_ids : [];
+      const nodeIds = Array.isArray(payload.node_ids)
+        ? payload.node_ids.map(normalizeGraphId)
+        : [];
       setHighlightedNodeIds(nodeIds);
       if (highlightTimerRef.current) {
         clearTimeout(highlightTimerRef.current);
@@ -228,8 +359,20 @@ function App() {
         events.forEach((evt) => {
           handleBackendEvent(evt);
         });
+        if (backendDownRef.current) {
+          backendDownRef.current = false;
+          clearNonFunctionSteps();
+        }
       } catch (error) {
-        console.error("[BACKEND][events] polling_error", error?.message || error);
+        const now = Date.now();
+        if (now - lastEventsErrorRef.current > 8000) {
+          console.error("[BACKEND][events] polling_error", error?.message || error);
+          lastEventsErrorRef.current = now;
+        }
+        if (!backendDownRef.current) {
+          backendDownRef.current = true;
+          clearNonFunctionSteps();
+        }
       }
     }, 1500);
 
@@ -246,7 +389,11 @@ function App() {
         const edges = res.data?.edges || [];
         setGraphData({ nodes, edges });
       } catch (error) {
-        console.error("[FRONTEND][graph] polling_error", error?.message || error);
+        const now = Date.now();
+        if (now - lastGraphErrorRef.current > 8000) {
+          console.error("[FRONTEND][graph] polling_error", error?.message || error);
+          lastGraphErrorRef.current = now;
+        }
       }
     }, 1500);
 
@@ -354,9 +501,9 @@ function App() {
         y: Math.round(centerY + Math.sin(angle) * radius),
       };
     });
-    const nodeMap = new Map(positionedNodes.map((node) => [node.id, node]));
+    const nodeMap = new Map(positionedNodes.map((node) => [normalizeGraphId(node.id), node]));
     const edges = (graphData.edges || []).filter(
-      (edge) => nodeMap.has(edge.from) && nodeMap.has(edge.to)
+      (edge) => nodeMap.has(normalizeGraphId(edge.from)) && nodeMap.has(normalizeGraphId(edge.to))
     );
     return { width, height, nodes: positionedNodes, edges };
   }, [graphData]);
@@ -366,8 +513,10 @@ function App() {
   const highlightedEdgeSet = useMemo(() => {
     const set = new Set();
     highlightedEdges.forEach((e) => {
-      set.add(`${e.from}|${e.to}`);
-      set.add(`${e.to}|${e.from}`); // bidireccional
+      const from = normalizeGraphId(e.from);
+      const to = normalizeGraphId(e.to);
+      set.add(`${from}|${to}`);
+      set.add(`${to}|${from}`); // bidireccional
     });
     return set;
   }, [highlightedEdges]);
@@ -496,15 +645,17 @@ function App() {
           >
             {graphLayout.edges.map((edge) => {
               const isActive = isScanning;
-              const edgeKey = `${edge.from}|${edge.to}`;
+              const edgeFrom = normalizeGraphId(edge.from);
+              const edgeTo = normalizeGraphId(edge.to);
+              const edgeKey = `${edgeFrom}|${edgeTo}`;
               const isEdgeHighlighted = highlightedEdgeSet.has(edgeKey);
-              const isNodeHighlighted = highlightedSet.has(edge.from) || highlightedSet.has(edge.to);
-              const source = graphLayout.nodes.find((n) => n.id === edge.from);
-              const target = graphLayout.nodes.find((n) => n.id === edge.to);
+              const isNodeHighlighted = highlightedSet.has(edgeFrom) || highlightedSet.has(edgeTo);
+              const source = graphLayout.nodes.find((n) => normalizeGraphId(n.id) === edgeFrom);
+              const target = graphLayout.nodes.find((n) => normalizeGraphId(n.id) === edgeTo);
               if (!source || !target) return null;
               return (
                 <line
-                  key={`${edge.from}-${edge.to}`}
+                  key={`${edgeFrom}-${edgeTo}`}
                   x1={source.x}
                   y1={source.y}
                   x2={target.x}
@@ -516,7 +667,7 @@ function App() {
 
             {graphLayout.nodes.map((node, idx) => {
               const isActive = isScanning;
-              const isHighlighted = highlightedSet.has(node.id);
+              const isHighlighted = highlightedSet.has(normalizeGraphId(node.id));
               const isSeed = idx === 0 || (searchDepth === 0 && isHighlighted);
               return (
                 <g 
@@ -562,7 +713,7 @@ function App() {
 
         <div className="graph-log">
           {graphSteps.length === 0 && (
-            <div className="graph-log-empty">Esperando pasos de fase 4...</div>
+            <div className="graph-log-empty">Function: -</div>
           )}
           {graphSteps.map((step) => (
             <div key={step.id} className={`graph-log-item ${step.level}`}>
