@@ -126,6 +126,28 @@ The system follows a microservices architecture with Docker containerization:
 
 ---
 
+## Example of the Knowledge Graph
+```mermaid
+graph TD
+    classDef tienda fill:#ff9900,stroke:#333,stroke-width:2px,color:white;
+    classDef prod fill:#0055ff,stroke:#333,stroke-width:2px,color:white;
+    classDef cat fill:#009900,stroke:#333,stroke-width:2px,color:white;
+
+    T_C(Tienda Central):::tienda
+    L1(MacBook Air M2):::prod
+    A1(Logitech MX Master):::prod
+    M1(Monitor LG):::prod
+    C_Lap[Cat: Laptops]:::cat
+    C_Acc[Cat: Accesorios]:::cat
+
+    L1 -->|PERTENECE_A| C_Lap
+    A1 -->|PERTENECE_A| C_Acc
+    L1 -->|COMPATIBLE_CON| A1
+    L1 -->|COMPATIBLE_CON| M1
+    T_C -->|TIENE_STOCK| L1
+```
+---
+
 ## Project Structure
 
 ```
