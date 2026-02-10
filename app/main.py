@@ -124,9 +124,23 @@ ROUTER_LABELS = [
 ]
 ROUTER_EMBEDS: Optional[List[List[float]]] = None
 DIRECT_RESPONSE_MARGIN = 0.06
+ROUTER_PENALTIES = {
+    "respuesta_directa": 0.14,
+    "user_correction": 0.10,
+}
+RISKY_ROUTER_LABELS = {"respuesta_directa", "user_correction"}
 
 INTENT_KEYWORDS = {
-    "browse_products": [r"\bbusco\b", r"\brecomiend", r"\bquiero ver\b", r"\bmostrar productos\b"],
+    "browse_products": [
+        r"\bbusco\b",
+        r"\brecomiend",
+        r"\bquiero ver\b",
+        r"\bmostrar productos\b",
+        r"\bdame m[aá]s informaci[oó]n\b",
+        r"\bmas informaci[oó]n\b",
+        r"\binformaci[oó]n sobre\b",
+        r"\binfo sobre\b",
+    ],
     "choose_option": [r"\bopci[oó]n\s*\d+", r"\bla segunda\b", r"\bla tercera\b", r"\bla primera\b"],
     "add_to_cart": [r"\bagrega\b", r"\bañade\b", r"\bme llevo\b", r"\bponer en carrito\b"],
     "remove_from_cart": [r"\bquita\b", r"\bremueve\b", r"\bsacar del carrito\b"],
@@ -169,28 +183,30 @@ def seleccionar_funcion(query_text: str, query_vec_norm: List[float]) -> Tuple[s
     # 2) Router semántico por similitud coseno
     sims = [cosine_sim(query_vec_norm, ROUTER_EMBEDS[i]) for i in range(len(ROUTER_LABELS))]
 
-    # Penaliza respuesta_directa como fallback para evitar sesgo
+    # Penaliza etiquetas propensas a falsos positivos semánticos.
     adjusted_sims = list(sims)
-    if "respuesta_directa" in ROUTER_LABELS:
-        idx_direct = ROUTER_LABELS.index("respuesta_directa")
-        adjusted_sims[idx_direct] = adjusted_sims[idx_direct] - 0.08
+    for label, penalty in ROUTER_PENALTIES.items():
+        if label in ROUTER_LABELS:
+            idx = ROUTER_LABELS.index(label)
+            adjusted_sims[idx] = adjusted_sims[idx] - penalty
 
-    best_idx = max(range(len(adjusted_sims)), key=lambda i: adjusted_sims[i])
+    ranked = sorted(
+        [(i, float(adjusted_sims[i])) for i in range(len(adjusted_sims))],
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    best_idx, best_score = ranked[0]
 
-    # Si respuesta_directa no gana con margen claro, preferimos el siguiente intent
-    if ROUTER_LABELS[best_idx] == "respuesta_directa":
-        ranked = sorted(
-            [(i, float(adjusted_sims[i])) for i in range(len(adjusted_sims))],
-            key=lambda item: item[1],
-            reverse=True,
-        )
-        if len(ranked) > 1:
-            _, best_score = ranked[0]
-            second_idx, second_score = ranked[1]
+    # Si gana una etiqueta riesgosa sin margen claro, preferimos la mejor alternativa no riesgosa.
+    if ROUTER_LABELS[best_idx] in RISKY_ROUTER_LABELS and len(ranked) > 1:
+        for second_idx, second_score in ranked[1:]:
+            if ROUTER_LABELS[second_idx] in RISKY_ROUTER_LABELS:
+                continue
             if (best_score - second_score) <= DIRECT_RESPONSE_MARGIN:
                 return ROUTER_LABELS[second_idx], second_score, adjusted_sims, "semantic_margin"
+            break
 
-    return ROUTER_LABELS[best_idx], float(adjusted_sims[best_idx]), adjusted_sims, "semantic"
+    return ROUTER_LABELS[best_idx], best_score, adjusted_sims, "semantic"
 
 
 @app.on_event("startup")
