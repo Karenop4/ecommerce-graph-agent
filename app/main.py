@@ -543,6 +543,20 @@ def _safe_int(x, default=1) -> int:
         return default
 
 
+def _normalize_product_ref(text: str) -> str:
+    """Normaliza referencia libre de producto (quita artículos/palabras de relleno)."""
+    t = (text or "").strip().lower()
+    t = re.sub(r"[^a-z0-9áéíóúüñ\s]", " ", t)
+    tokens = [tok for tok in t.split() if tok]
+    stop = {
+        "el", "la", "los", "las", "un", "una", "unos", "unas",
+        "al", "del", "de", "por", "favor", "carrito", "agrega", "agregar",
+        "añade", "anade", "quiero", "producto", "item",
+    }
+    cleaned = [tok for tok in tokens if tok not in stop]
+    return " ".join(cleaned).strip()
+
+
 # -------------------------
 # CARRITO helpers
 # -------------------------
@@ -759,7 +773,10 @@ def agregar_al_carrito(producto_ref: str, qty: int = 1, user_id: str = "anonimo"
             return f"✅ Agregado: {chosen['nombre']} x{qty}\n\n{cart_to_text(state)}"
         return "No encontré esa opción en la lista. Dime 1, 2 o 3."
 
-    # (2) resolver por id o embedding
+    # (2) resolver por id, match léxico robusto o embedding
+    normalized_ref = _normalize_product_ref(ref)
+    ref_tokens = [t for t in normalized_ref.split() if t]
+
     with driver.session() as session:
         prod = None
         looks_like_id = len(ref) <= 6 and ref[:1].isalpha()
@@ -768,7 +785,7 @@ def agregar_al_carrito(producto_ref: str, qty: int = 1, user_id: str = "anonimo"
                 "MATCH (p:Producto {id:$id}) RETURN p.id AS id, p.nombre AS nombre, p.precio AS precio LIMIT 1",
                 id=ref.upper()
             ).single()
-        if not prod:
+        if not prod and normalized_ref:
             prod = session.run(
                 """
                 MATCH (p:Producto)
@@ -778,14 +795,26 @@ def agregar_al_carrito(producto_ref: str, qty: int = 1, user_id: str = "anonimo"
                 ORDER BY len_nombre ASC
                 LIMIT 1
                 """,
-                ref=ref,
+                ref=normalized_ref,
+            ).single()
+        if not prod and ref_tokens:
+            prod = session.run(
+                """
+                MATCH (p:Producto)
+                WHERE all(tok IN $tokens WHERE toLower(p.nombre) CONTAINS tok)
+                RETURN p.id AS id, p.nombre AS nombre, p.precio AS precio,
+                       size(p.nombre) AS len_nombre
+                ORDER BY len_nombre ASC
+                LIMIT 1
+                """,
+                tokens=ref_tokens,
             ).single()
         if not prod:
-            v = embedder.encode(ref).tolist()
+            v = embedder.encode(normalized_ref or ref).tolist()
             prod = session.run("""
                 CALL db.index.vector.queryNodes('productos_embeddings', 1, $vector)
                 YIELD node AS p, score
-                WHERE score > 0.6
+                WHERE score > 0.72
                 RETURN p.id AS id, p.nombre AS nombre, p.precio AS precio
             """, vector=v).single()
 
@@ -1376,6 +1405,8 @@ def _query_explicitly_mentions_product(query_text: str) -> bool:
         r"\bopci[oó]n\s*\d+\b",
         r"\blaptop\b", r"\bmac\b", r"\bmacbook\b", r"\blenovo\b", r"\bdell\b",
         r"\bmouse\b", r"\bmonitor\b", r"\baud[ií]fonos\b", r"\bteclado\b",
+        r"\brazer\b", r"\basus\b", r"\blogitech\b", r"\bacer\b", r"\bhp\b",
+        r"\bsamsung\b", r"\bsony\b",
     ]
     return any(re.search(pat, q) for pat in patterns)
 
@@ -1746,13 +1777,6 @@ def redactar_respuesta(query_text: str, tool_results: List[Dict[str, Any]], stat
             cleaned_results.append({"tool": str(r.get("tool", "")), "output": out})
 
         if cleaned_results:
-            # Si hubo múltiples acciones de carrito en una misma ejecución,
-            # mantener el mensaje de acción + una sola vista final del carrito.
-            cart_tools = {"agregar_al_carrito", "remover_del_carrito", "vaciar_carrito", "ver_carrito"}
-            has_non_view_cart = any(r["tool"] in cart_tools - {"ver_carrito"} for r in cleaned_results)
-            if has_non_view_cart:
-                cleaned_results = [r for r in cleaned_results if r["tool"] != "ver_carrito"]
-
             deduped: List[Dict[str, Any]] = []
             seen_pairs = set()
             for r in cleaned_results:
@@ -1761,6 +1785,22 @@ def redactar_respuesta(query_text: str, tool_results: List[Dict[str, Any]], stat
                     continue
                 seen_pairs.add(key)
                 deduped.append(r)
+
+            # Para carrito, priorizamos salida determinista de tools (evita alucinaciones).
+            cart_tools = {"agregar_al_carrito", "remover_del_carrito", "vaciar_carrito", "ver_carrito"}
+            if any(r["tool"] in cart_tools for r in deduped):
+                cart_outputs: List[str] = []
+                seen_cart_out = set()
+                for r in deduped:
+                    if r["tool"] not in cart_tools:
+                        continue
+                    out = _naturalize_generic_text(r["output"])
+                    if out in seen_cart_out:
+                        continue
+                    seen_cart_out.add(out)
+                    cart_outputs.append(out)
+                if cart_outputs:
+                    return "¡Listo! 😊\n\n" + "\n\n".join(cart_outputs)
 
             contexto_tools = "\n\n".join(
                 f"[{r['tool']}]\n{_naturalize_generic_text(r['output'])}" for r in deduped
