@@ -129,6 +129,13 @@ ROUTER_PENALTIES = {
     "user_correction": 0.10,
 }
 RISKY_ROUTER_LABELS = {"respuesta_directa", "user_correction"}
+GRAPH_HIGHLIGHT_TOOLS = {
+    "buscar_productos",
+    "buscar_relaciones_grafo",
+    "verificar_stock",
+    "verificar_stock_carrito",
+    "obtener_contacto_tienda",
+}
 
 INTENT_KEYWORDS = {
     "browse_products": [
@@ -1266,6 +1273,15 @@ Tools válidas:
 """
 
 
+def _fallback_plan(router_label: str, user_id: str, state: Dict[str, Any]) -> Dict[str, Any]:
+    """Fallback determinista cuando el planner devuelve steps vacíos en intents críticos."""
+    if router_label == "finalize_purchase":
+        cart = state.get("cart_items", []) or []
+        if cart:
+            return {"steps": [{"tool": "finalizar_compra", "args": {"tienda": "", "user_id": user_id}}]}
+    return {"steps": []}
+
+
 def planificar(query_text: str, router_label: str, user_id: str, state: Dict[str, Any]) -> Dict[str, Any]:
     """Genera un plan JSON con herramientas a ejecutar."""
     prompt = (
@@ -1285,9 +1301,19 @@ def planificar(query_text: str, router_label: str, user_id: str, state: Dict[str
         for s in plan["steps"]:
             if isinstance(s, dict) and isinstance(s.get("args"), dict):
                 s["args"]["user_id"] = user_id
+
+        if not plan.get("steps"):
+            fallback = _fallback_plan(router_label, user_id, state)
+            if fallback.get("steps"):
+                logger.info(f"[PLANNER] fallback aplicado para intent={router_label}")
+                return fallback
         return plan
     except Exception as e:
         logger.warning(f"⚠️ [PLANNER] JSON inválido => steps=[] | err={e} | raw={raw[:200]}")
+        fallback = _fallback_plan(router_label, user_id, state)
+        if fallback.get("steps"):
+            logger.info(f"[PLANNER] fallback aplicado tras error para intent={router_label}")
+            return fallback
         return {"steps": []}
 
 
@@ -1368,7 +1394,7 @@ def ejecutar_plan(plan: Dict[str, Any], user_id: str, trace_id: str, initial_res
         try:
             out = _invoke_tool(tool_name, args)
 
-            if tool_name != "buscar_relaciones_grafo":
+            if tool_name in GRAPH_HIGHLIGHT_TOOLS and tool_name != "buscar_relaciones_grafo":
                 emit_graph_highlight_for_tool(user_id, tool_name, args)
 
             results.append({"tool": tool_name, "args": args, "output": out})

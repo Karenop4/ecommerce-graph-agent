@@ -57,6 +57,7 @@ function App() {
   const lastEventsErrorRef = useRef(0);
   const lastGraphErrorRef = useRef(0);
   const backendDownRef = useRef(false);
+  const activeToolRef = useRef("");
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -235,7 +236,7 @@ function App() {
   const handleBackendEvent = (evt) => {
     if (!evt || !evt.event) return;
     const payload = evt.payload || {};
-    const isGraphToolActive = GRAPH_SEARCH_TOOLS.has(graphMeta.activeTool);
+    const isGraphToolActive = GRAPH_SEARCH_TOOLS.has(activeToolRef.current);
 
     if (evt.event === "function_selected") {
       const label = payload.selected_function || "?";
@@ -251,6 +252,7 @@ function App() {
     if (evt.event === "queue_step_start") {
       const tool = payload.tool || "tool";
       clearNonFunctionSteps();
+      activeToolRef.current = tool;
       setGraphMeta((prev) => ({
         ...prev,
         activeTool: tool,
