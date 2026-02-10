@@ -35,6 +35,7 @@ langchain.debug = True
 logger = setup_structured_logging()
 settings = load_settings()
 
+
 app = FastAPI(title="Agente E-Commerce Conversacional + Redis (Planner + Logs)")
 
 app.add_middleware(
@@ -61,6 +62,7 @@ embedder: Optional[SentenceTransformer] = None
 llm: Optional[ChatOpenAI] = None
 driver = None
 rdb = None
+GRAPH_HIGHLIGHTS: Dict[str, List[str]] = {}
 
 
 # ----------------------------------------------------------------------
@@ -260,16 +262,29 @@ def _events_key(user_id: str) -> str:
     return f"events:{user_id}"
 
 
+def _sanitize_event_payload(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    def strip_value(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                k: strip_value(v)
+                for k, v in value.items()
+                if k not in ("user_id", "trace_id", "timestamp", "ts")
+            }
+        if isinstance(value, list):
+            return [strip_value(v) for v in value]
+        return value
+
+    return strip_value(payload or {})
+
+
 def emit_event(user_id: str, level: str, event: str, payload: Optional[Dict[str, Any]] = None) -> None:
-    data = {
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "level": level,
-        "event": event,
-        "payload": payload or {},
-    }
-    logger.info(f"event={event} user_id={user_id} payload={payload or {}}")
     if not rdb:
         return
+    data = {
+        "level": level,
+        "event": event,
+        "payload": _sanitize_event_payload(payload),
+    }
     rdb.rpush(_events_key(user_id), json.dumps(data, ensure_ascii=False))
     rdb.expire(_events_key(user_id), REDIS_TTL_SECONDS)
 
@@ -449,7 +464,7 @@ def parse_cart_indexes(text: str) -> List[int]:
 @tool
 def buscar_productos(query: str, user_id: str = "anonimo") -> str:
     """Explora catálogo (NO stock). Guarda candidatos en Redis para usar 'la segunda'."""
-    logger.info(f"🛠️ [TOOL] buscar_productos | user_id={user_id} | query='{query}'")
+    logger.info(f"🛠️ [TOOL] buscar_productos | query='{query}'")
     v = embedder.encode(query).tolist()
 
     cypher = """
@@ -494,7 +509,7 @@ def buscar_productos(query: str, user_id: str = "anonimo") -> str:
 @tool
 def seleccionar_opcion(opcion: str, user_id: str = "anonimo") -> str:
     """Selecciona un producto por ordinal ('la segunda', '2') usando last_candidates."""
-    logger.info(f"🛠️ [TOOL] seleccionar_opcion | user_id={user_id} | opcion='{opcion}'")
+    logger.info(f"🛠️ [TOOL] seleccionar_opcion | opcion='{opcion}'")
     state = get_state(user_id)
     candidates = state.get("last_candidates", []) or []
     if not candidates:
@@ -515,7 +530,7 @@ def agregar_al_carrito(producto_ref: str, qty: int = 1, user_id: str = "anonimo"
     Agrega producto al carrito.
     producto_ref puede ser ordinal ('la segunda'), id ('L3') o nombre ('Asus ROG...').
     """
-    logger.info(f"🛠️ [TOOL] agregar_al_carrito | user_id={user_id} | ref='{producto_ref}' qty={qty}")
+    logger.info(f"🛠️ [TOOL] agregar_al_carrito | ref='{producto_ref}' qty={qty}")
     state = get_state(user_id)
     ref = (producto_ref or "").strip()
     if not ref:
@@ -569,14 +584,14 @@ def agregar_al_carrito(producto_ref: str, qty: int = 1, user_id: str = "anonimo"
 @tool
 def ver_carrito(user_id: str = "anonimo") -> str:
     """Muestra el carrito actual del usuario usando Redis."""
-    logger.info(f"🛠️ [TOOL] ver_carrito | user_id={user_id}")
+    logger.info("🛠️ [TOOL] ver_carrito")
     return cart_to_text(get_state(user_id))
 
 
 @tool
 def vaciar_carrito(user_id: str = "anonimo") -> str:
     """Vacía completamente el carrito (solo si el usuario lo pidió explícitamente)."""
-    logger.info(f"🛠️ [TOOL] vaciar_carrito | user_id={user_id}")
+    logger.info("🛠️ [TOOL] vaciar_carrito")
     state = get_state(user_id)
     state = cart_clear(state)
     save_state(user_id, state)
@@ -592,7 +607,7 @@ def remover_del_carrito(items_ref: str, user_id: str = "anonimo") -> str:
     - Por nombre/id: "logitech, razer y dell" / "L2"
     - Por índice: "1 y 3" / "item 2" / "items 1,3"
     """
-    logger.info(f"🛠️ [TOOL] remover_del_carrito | user_id={user_id} | items_ref='{items_ref}'")
+    logger.info(f"🛠️ [TOOL] remover_del_carrito | items_ref='{items_ref}'")
     state = get_state(user_id)
     cart_before = list(state.get("cart_items", []) or [])
     if not cart_before:
@@ -663,7 +678,7 @@ def verificar_stock(producto_ref: str = "", tienda: str = "", user_id: str = "an
         else:
             return "¿De cuál producto? Puedes decir 'la primera/segunda' o escribir el nombre."
 
-    logger.info(f"🛠️ [TOOL] verificar_stock | user_id={user_id} | producto_ref='{producto_ref}' tienda='{tienda}'")
+    logger.info(f"🛠️ [TOOL] verificar_stock | producto_ref='{producto_ref}' tienda='{tienda}'")
 
     with driver.session() as session:
         prod = None
@@ -718,7 +733,7 @@ def verificar_stock(producto_ref: str = "", tienda: str = "", user_id: str = "an
 @tool
 def verificar_stock_carrito(tienda: str = "", user_id: str = "anonimo") -> str:
     """Revisa stock para TODO el carrito y guarda selected_store (mejor opción) si no se especifica tienda."""
-    logger.info(f"🛠️ [TOOL] verificar_stock_carrito | user_id={user_id} | tienda='{tienda}'")
+    logger.info(f"🛠️ [TOOL] verificar_stock_carrito | tienda='{tienda}'")
     state = get_state(user_id)
     cart = state.get("cart_items", []) or []
     if not cart:
@@ -777,7 +792,7 @@ def obtener_contacto_tienda(nombre_tienda: str = "", user_id: str = "anonimo") -
         else:
             return "¿De qué tienda? Opciones: Tienda Central, Sucursal Norte, Venta Online."
 
-    logger.info(f"🛠️ [TOOL] obtener_contacto_tienda | user_id={user_id} | tienda='{nombre_tienda}'")
+    logger.info(f"🛠️ [TOOL] obtener_contacto_tienda | tienda='{nombre_tienda}'")
 
     with driver.session() as session:
         row = session.run("""
@@ -808,7 +823,7 @@ def obtener_contacto_tienda(nombre_tienda: str = "", user_id: str = "anonimo") -
 @tool
 def registrar_correccion(entidad: str, correccion: str, user_id: str = "anonimo") -> str:
     """Guarda una corrección del usuario en Neo4j (producto/tienda/auto)."""
-    logger.info(f"🛠️ [TOOL] registrar_correccion | user_id={user_id} | entidad='{entidad}'")
+    logger.info(f"🛠️ [TOOL] registrar_correccion | entidad='{entidad}'")
     state = get_state(user_id)
 
     texto = (correccion or "").strip()
@@ -864,7 +879,7 @@ def finalizar_compra(tienda: str = "", user_id: str = "anonimo") -> str:
     - Devuelve "✅ Compra realizada" + tienda + contacto + lista de productos
     - Vacía el carrito
     """
-    logger.info(f"🛠️ [TOOL] finalizar_compra | user_id={user_id} | tienda='{tienda}'")
+    logger.info(f"🛠️ [TOOL] finalizar_compra | tienda='{tienda}'")
 
     state = get_state(user_id)
     cart = state.get("cart_items", []) or []
@@ -947,8 +962,50 @@ def finalizar_compra(tienda: str = "", user_id: str = "anonimo") -> str:
 @tool
 def buscar_relaciones_grafo(termino: str, user_id: str = "anonimo") -> str:
     """Búsqueda BFS en el grafo (semillas por texto + expansión por relaciones)."""
-    logger.info("tool_buscar_relaciones_grafo", extra={"extra": {"user_id": user_id, "termino": termino}})
-    rows = buscar_en_grafo(driver, termino=termino, limite=5, max_depth=2)
+    logger.info(f"tool_buscar_relaciones_grafo termino='{termino}'")
+    
+    all_visited_nodes = []
+    all_edges = []
+    
+    def on_search_step(depth: int, node_ids: list, edge_tuples: list):
+        """Callback para emitir eventos en cada paso del BFS."""
+        all_visited_nodes.extend(node_ids)
+        GRAPH_HIGHLIGHTS[user_id] = list(dict.fromkeys(all_visited_nodes))
+        edges_data = [{"from": e[0], "to": e[1], "type": e[2]} for e in edge_tuples]
+        all_edges.extend(edges_data)
+        
+        emit_event(user_id, "info", "graph_search_step", {
+            "depth": depth,
+            "node_ids": node_ids,
+            "edges": edges_data,
+            "cumulative_nodes": list(dict.fromkeys(all_visited_nodes)),
+        })
+    
+    rows = buscar_en_grafo(
+        driver,
+        termino=termino,
+        limite=5,
+        max_depth=2,
+        on_step=on_search_step,
+        step_delay=0.4,
+    )
+    
+    if rows:
+        node_ids = []
+        for row in rows:
+            seed_id = row.get("seed_id")
+            related_id = row.get("related_id")
+            if seed_id:
+                node_ids.append(seed_id)
+            if related_id:
+                node_ids.append(related_id)
+        unique_nodes = list(dict.fromkeys(node_ids))
+        GRAPH_HIGHLIGHTS[user_id] = unique_nodes
+        emit_event(user_id, "info", "graph_search_complete", {
+            "node_ids": unique_nodes,
+            "edges": all_edges,
+            "total_depth": 2,
+        })
     return format_graph_search_results(rows)
 
 
@@ -1103,6 +1160,7 @@ def ejecutar_plan(plan: Dict[str, Any], user_id: str, trace_id: str, initial_res
             "args": args,
             "queue_progress_before": f"{idx}/{len(steps)}",
         })
+        logger.info(f"Fase 4: paso {human_idx}/{len(steps)} {tool_name}")
 
         try:
             if tool_name == "buscar_productos":
@@ -1149,6 +1207,7 @@ def ejecutar_plan(plan: Dict[str, Any], user_id: str, trace_id: str, initial_res
                 "tool": tool_name,
                 "error": str(step_error),
             })
+            logger.error(f"Fase 4: paso {human_idx} ERROR -> {tool_name}")
             raise
 
     emit_event(user_id, "info", "queue_execution_finished", {
@@ -1266,12 +1325,10 @@ def redactar_respuesta(query_text: str, tool_results: List[Dict[str, Any]], stat
 def ejecutar_pipeline(query_text: str, trace_id: str, user_id: str) -> Dict[str, Any]:
     """Ejecuta pipeline: embedding -> router -> planner -> tools -> responder."""
     state = get_state(user_id)
-
-    logger.info(f"🧩 [FASE 1] ({trace_id}) Query -> Embedding")
+    logger.info(f"Fase 1: query = \"{query_text}\"")
     q_vec = embedder.encode(query_text, normalize_embeddings=True).tolist()
-    logger.info(f"🧩 [FASE 1] ({trace_id}) dim={len(q_vec)}")
+    logger.info("Fase 2: embedding")
 
-    logger.info(f"🧭 [FASE 2] ({trace_id}) Function Selection")
     router_label, router_score, sims, router_strategy = seleccionar_funcion(query_text, q_vec)
     ranked = sorted(
         [{"label": ROUTER_LABELS[i], "score": float(sims[i])} for i in range(len(ROUTER_LABELS))],
@@ -1279,17 +1336,6 @@ def ejecutar_pipeline(query_text: str, trace_id: str, user_id: str) -> Dict[str,
         reverse=True,
     )
     top3 = ranked[:3]
-    logger.info(
-        "function_selection_result",
-        extra={"extra": {
-            "trace_id": trace_id,
-            "user_id": user_id,
-            "selected_function": router_label,
-            "selected_score": round(float(router_score), 4),
-            "selection_strategy": router_strategy,
-            "top_candidates": top3,
-        }},
-    )
     emit_event(
         user_id,
         "info",
@@ -1302,12 +1348,14 @@ def ejecutar_pipeline(query_text: str, trace_id: str, user_id: str) -> Dict[str,
             "top_candidates": top3,
         },
     )
+    logger.info(f"Fase 3: Function selection = \"{router_label}\" (score={round(float(router_score), 4)})")
 
     update_state(user_id, {"last_intent": router_label})
 
-    logger.info(f"🗺️ [FASE 3] ({trace_id}) Planner")
+    logger.info("Fase 4: planificacion")
     plan = planificar(query_text, router_label, user_id, state)
-    logger.info(f"🗺️ [FASE 3] ({trace_id}) Plan={plan}")
+    plan_tools = [step.get("tool") for step in plan.get("steps", []) if isinstance(step, dict)]
+    logger.info(f"Fase 4: plan = {plan_tools}")
 
     emit_event(user_id, "info", "phase_4_start", {"trace_id": trace_id})
     tool_results = ejecutar_o_reanudar_cola(plan, user_id=user_id, trace_id=trace_id)
@@ -1315,9 +1363,9 @@ def ejecutar_pipeline(query_text: str, trace_id: str, user_id: str) -> Dict[str,
 
     state_after = get_state(user_id)
 
-    logger.info(f"💬 [FASE 5] ({trace_id}) Respuesta")
+    logger.info("Fase 5: respuesta")
     response = redactar_respuesta(query_text, tool_results, state_after)
-    logger.info(f"💬 [FASE 5] ({trace_id}) len={len(response)}")
+    logger.info("Fase 5: respuesta OK")
 
     return {
         "response": response,
@@ -1331,6 +1379,90 @@ def ejecutar_pipeline(query_text: str, trace_id: str, user_id: str) -> Dict[str,
 # ----------------------------------------------------------------------
 # 9) API
 # ----------------------------------------------------------------------
+def _display_label(node_id: int, labels: List[str], props: Dict[str, Any]) -> str:
+    for key in ("nombre", "name", "titulo", "id"):
+        val = props.get(key)
+        if val:
+            return str(val)
+    if labels:
+        return labels[0]
+    return str(node_id)
+
+
+def fetch_graph_snapshot(limit_nodes: int = 50, limit_edges: int = 80, highlight_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+    if not driver:
+        return {"nodes": [], "edges": []}
+
+    nodes: Dict[str, Dict[str, Any]] = {}
+    edges: List[Dict[str, Any]] = []
+    edge_keys = set()
+
+    highlight_ids = highlight_ids or []
+
+    cypher_highlight = """
+    MATCH (n)
+    WHERE elementId(n) IN $highlight_ids
+    OPTIONAL MATCH (n)-[r]-(m)
+    RETURN elementId(n) AS n_id, labels(n) AS n_labels, properties(n) AS n_props,
+           elementId(m) AS m_id, labels(m) AS m_labels, properties(m) AS m_props,
+           type(r) AS r_type
+    """
+
+    cypher_sample = """
+    MATCH (n)
+    WITH n LIMIT $limit_nodes
+    OPTIONAL MATCH (n)-[r]-(m)
+    RETURN elementId(n) AS n_id, labels(n) AS n_labels, properties(n) AS n_props,
+           elementId(m) AS m_id, labels(m) AS m_labels, properties(m) AS m_props,
+           type(r) AS r_type
+    LIMIT $limit_edges
+    """
+
+    def add_row(row: Any) -> None:
+        n_id = row.get("n_id")
+        n_labels = row.get("n_labels") or []
+        n_props = row.get("n_props") or {}
+        if n_id is not None and n_id not in nodes:
+            nodes[n_id] = {
+                "id": n_id,
+                "label": _display_label(n_id, n_labels, n_props),
+                "labels": n_labels,
+                "props": n_props,
+            }
+
+        m_id = row.get("m_id")
+        m_labels = row.get("m_labels") or []
+        m_props = row.get("m_props") or {}
+        if m_id is not None and m_id not in nodes:
+            nodes[m_id] = {
+                "id": m_id,
+                "label": _display_label(m_id, m_labels, m_props),
+                "labels": m_labels,
+                "props": m_props,
+            }
+
+        rel_type = row.get("r_type")
+        if rel_type and n_id is not None and m_id is not None:
+            key = f"{n_id}|{m_id}|{rel_type}"
+            if key not in edge_keys:
+                edge_keys.add(key)
+                edges.append({
+                    "from": n_id,
+                    "to": m_id,
+                    "type": rel_type,
+                })
+
+    with driver.session() as session:
+        if highlight_ids:
+            highlight_rows = session.run(cypher_highlight, highlight_ids=highlight_ids)
+            for row in highlight_rows:
+                add_row(row)
+
+        sample_rows = session.run(cypher_sample, limit_nodes=limit_nodes, limit_edges=limit_edges)
+        for row in sample_rows:
+            add_row(row)
+
+    return {"nodes": list(nodes.values()), "edges": edges}
 class ChatRequest(BaseModel):
     query: str
     user_id: str = "anonimo"
@@ -1343,15 +1475,23 @@ class FeedbackRequest(BaseModel):
     user_id: str = "anonimo"
 
 
+@app.get("/graph")
+async def graph_endpoint(
+    limit_nodes: int = Query(default=50, ge=1, le=200),
+    limit_edges: int = Query(default=80, ge=0, le=300),
+    user_id: Optional[str] = None,
+):
+    highlight_ids = GRAPH_HIGHLIGHTS.get(user_id or "", [])
+    return fetch_graph_snapshot(limit_nodes=limit_nodes, limit_edges=limit_edges, highlight_ids=highlight_ids)
+
+
 @app.post("/chat")
 async def chat_endpoint(req: ChatRequest):
     trace_id = str(uuid.uuid4())[:8]
-    logger.info("chat_request", extra={"extra": {"trace_id": trace_id, "user_id": req.user_id, "query": req.query}})
-    emit_event(req.user_id, "info", "chat_request", {"trace_id": trace_id, "query": req.query})
+    logger.info("chat_request")
 
     if is_off_topic_query(req.query):
-        logger.info("chat_off_topic_filtered", extra={"extra": {"trace_id": trace_id, "user_id": req.user_id}})
-        emit_event(req.user_id, "warning", "chat_off_topic_filtered", {"trace_id": trace_id})
+        logger.info("chat_off_topic_filtered")
         return {"response": off_topic_response(), "run_id": None, "trace_id": trace_id, "status": "filtered"}
 
     start = perf_counter()
@@ -1370,13 +1510,11 @@ async def chat_endpoint(req: ChatRequest):
             mlflow.log_text(result["response"], "respuesta_agente.txt")
             mlflow.log_text(json.dumps(result["state"], ensure_ascii=False, indent=2), "state.json")
 
-            logger.info("chat_success", extra={"extra": {"trace_id": trace_id, "user_id": req.user_id, "latency_ms": round(latency_ms, 2), "router_label": result["router"]["label"]}})
-            emit_event(req.user_id, "info", "chat_success", {"trace_id": trace_id, "latency_ms": round(latency_ms, 2), "router_label": result["router"]["label"]})
+            logger.info("chat_success")
             return {"response": result["response"], "run_id": run_id, "trace_id": trace_id, "status": "success"}
 
     except Exception as e:
-        logger.error("chat_error", extra={"extra": {"trace_id": trace_id, "error": str(e)}}, exc_info=True)
-        emit_event(req.user_id, "error", "chat_error", {"trace_id": trace_id, "error": str(e)})
+        logger.error("chat_error", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1398,7 +1536,7 @@ async def events_endpoint(user_id: str, limit: int = Query(default=50, ge=1, le=
 
 @app.post("/feedback")
 async def feedback_endpoint(req: FeedbackRequest):
-    logger.info(f"⭐ [HTTP] /feedback | run_id={req.run_id} | score={req.score} | user_id={req.user_id}")
+    logger.info(f"⭐ [HTTP] /feedback | run_id={req.run_id} | score={req.score}")
 
     try:
         with mlflow.start_run(run_id=req.run_id):
@@ -1413,7 +1551,7 @@ async def feedback_endpoint(req: FeedbackRequest):
             pid = state.get("selected_product_id")
             store = state.get("selected_store")
 
-            logger.info(f"🧠 [AUTO-LEARN] user_id={req.user_id} pid={pid} store={store} texto='{texto}'")
+            logger.info(f"🧠 [AUTO-LEARN] pid={pid} store={store} texto='{texto}'")
 
             with driver.session() as session:
                 if pid:
@@ -1460,4 +1598,4 @@ async def feedback_endpoint(req: FeedbackRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000, access_log=False)

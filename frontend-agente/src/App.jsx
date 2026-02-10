@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import axios from "axios";
 import ReactMarkdown from "react-markdown";
 import { ArrowUp, User, Bot, ThumbsUp, ThumbsDown, Send } from "lucide-react";
@@ -6,6 +6,16 @@ import "./App.css";
 
 const API_URL = "http://localhost:8000";
 const USER_ID = "usuario_demo";
+
+const GRAPH_SEARCH_TOOLS = new Set([
+  "buscar_productos",
+  "buscar_relaciones_grafo",
+  "verificar_stock",
+  "verificar_stock_carrito",
+  "obtener_contacto_tienda",
+]);
+
+const GRAPH_CANVAS = { width: 320, height: 220 };
 
 function App() {
   const [messages, setMessages] = useState([
@@ -20,11 +30,27 @@ function App() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
 
+  const [graphSteps, setGraphSteps] = useState([]);
+  const [graphPulses, setGraphPulses] = useState([]);
+  const [highlightedNodeIds, setHighlightedNodeIds] = useState([]);
+  const [highlightedEdges, setHighlightedEdges] = useState([]);
+  const [searchDepth, setSearchDepth] = useState(-1);
+  const [graphMeta, setGraphMeta] = useState({
+    status: "idle",
+    activeTool: "",
+    traceId: "",
+    lastEvent: 0,
+    currentDepth: -1,
+  });
+  const [graphData, setGraphData] = useState({ nodes: [], edges: [] });
+
   const [activeFeedback, setActiveFeedback] = useState(null); // { runId, index }
   const [commentText, setCommentText] = useState("");
 
   const messagesEndRef = useRef(null);
   const feedbackTextareaRef = useRef(null);
+  const pulseTimersRef = useRef([]);
+  const highlightTimerRef = useRef(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -37,6 +63,162 @@ function App() {
   }, [activeFeedback]);
 
   useEffect(() => {
+    return () => {
+      pulseTimersRef.current.forEach((timer) => clearTimeout(timer));
+      pulseTimersRef.current = [];
+      if (highlightTimerRef.current) {
+        clearTimeout(highlightTimerRef.current);
+      }
+    };
+  }, []);
+
+  const addGraphStep = (text, level = "info") => {
+    const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    setGraphSteps((prev) => [{ id, text, level }, ...prev].slice(0, 6));
+  };
+
+  const queuePulse = (depth, label, delayMs = 0) => {
+    const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const startTimer = setTimeout(() => {
+      setGraphPulses((prev) => [...prev, { id, depth, label, ts: Date.now() }]);
+    }, delayMs);
+    const endTimer = setTimeout(() => {
+      setGraphPulses((prev) => prev.filter((pulse) => pulse.id !== id));
+    }, delayMs + 1400);
+
+    pulseTimersRef.current.push(startTimer, endTimer);
+  };
+
+  const triggerGraphSearch = (label, traceId) => {
+    setGraphMeta((prev) => ({
+      ...prev,
+      status: "active",
+      activeTool: label,
+      traceId: traceId || prev.traceId,
+      lastEvent: Date.now(),
+    }));
+
+    queuePulse(0, label, 0);
+    queuePulse(1, label, 220);
+    queuePulse(2, label, 440);
+  };
+
+  const handleBackendEvent = (evt) => {
+    if (!evt || !evt.event) return;
+    const payload = evt.payload || {};
+
+    if (evt.event === "function_selected") {
+      const label = payload.selected_function || "?";
+      const score = payload.selected_score ?? "?";
+      addGraphStep(`Function: ${label} (${score})`);
+      setGraphMeta((prev) => ({
+        ...prev,
+        traceId: payload.trace_id || prev.traceId,
+        lastEvent: Date.now(),
+      }));
+      return;
+    }
+
+    if (evt.event === "queue_step_start") {
+      const tool = payload.tool || "tool";
+      addGraphStep(`Paso ${payload.step || "?"}: ${tool}`);
+      setGraphMeta((prev) => ({
+        ...prev,
+        activeTool: tool,
+        traceId: payload.trace_id || prev.traceId,
+        lastEvent: Date.now(),
+      }));
+
+      if (GRAPH_SEARCH_TOOLS.has(tool)) {
+        // Limpiar highlights anteriores al iniciar nueva búsqueda
+        setHighlightedNodeIds([]);
+        setHighlightedEdges([]);
+        setSearchDepth(-1);
+        triggerGraphSearch(tool, payload.trace_id);
+      }
+      return;
+    }
+
+    if (evt.event === "queue_step_done") {
+      addGraphStep(`OK: ${payload.tool || "tool"}`, "ok");
+      return;
+    }
+
+    if (evt.event === "queue_step_error") {
+      addGraphStep(`Error: ${payload.tool || "tool"}`, "error");
+      setGraphMeta((prev) => ({ ...prev, status: "idle" }));
+      return;
+    }
+
+    if (evt.event === "queue_execution_finished") {
+      setGraphMeta((prev) => ({ ...prev, status: "idle" }));
+    }
+
+    // Evento de paso de búsqueda BFS (nuevo - animación progresiva)
+    if (evt.event === "graph_search_step") {
+      const depth = payload.depth ?? 0;
+      const nodeIds = Array.isArray(payload.node_ids) ? payload.node_ids : [];
+      const edges = Array.isArray(payload.edges) ? payload.edges : [];
+      const cumulativeNodes = Array.isArray(payload.cumulative_nodes) ? payload.cumulative_nodes : nodeIds;
+      
+      addGraphStep(`BFS depth=${depth}: ${nodeIds.length} nodos`, depth === 0 ? "info" : "ok");
+      
+      setSearchDepth(depth);
+      setHighlightedNodeIds(cumulativeNodes);
+      setHighlightedEdges((prev) => [...prev, ...edges]);
+      setGraphMeta((prev) => ({
+        ...prev,
+        status: "active",
+        currentDepth: depth,
+        lastEvent: Date.now(),
+      }));
+      
+      // Disparar pulso visual para este nivel
+      queuePulse(depth, `depth-${depth}`, 0);
+      return;
+    }
+    
+    // Evento de búsqueda completada
+    if (evt.event === "graph_search_complete") {
+      const nodeIds = Array.isArray(payload.node_ids) ? payload.node_ids : [];
+      const edges = Array.isArray(payload.edges) ? payload.edges : [];
+      
+      addGraphStep(`✓ Búsqueda completa: ${nodeIds.length} nodos`, "ok");
+      setHighlightedNodeIds(nodeIds);
+      setHighlightedEdges(edges);
+      setSearchDepth(-1);
+      setGraphMeta((prev) => ({
+        ...prev,
+        status: "idle",
+        currentDepth: -1,
+      }));
+      
+      // Limpiar highlights después de un tiempo
+      if (highlightTimerRef.current) {
+        clearTimeout(highlightTimerRef.current);
+      }
+      highlightTimerRef.current = setTimeout(() => {
+        setHighlightedNodeIds([]);
+        setHighlightedEdges([]);
+      }, 8000);
+      return;
+    }
+
+    // Evento legacy (por compatibilidad)
+    if (evt.event === "graph_search_result") {
+      const nodeIds = Array.isArray(payload.node_ids) ? payload.node_ids : [];
+      setHighlightedNodeIds(nodeIds);
+      if (highlightTimerRef.current) {
+        clearTimeout(highlightTimerRef.current);
+      }
+      highlightTimerRef.current = setTimeout(() => {
+        setHighlightedNodeIds([]);
+        setHighlightedEdges([]);
+      }, 6000);
+    }
+  };
+
+  useEffect(() => {
     const interval = setInterval(async () => {
       try {
         const res = await axios.get(`${API_URL}/events/${USER_ID}`, {
@@ -44,13 +226,27 @@ function App() {
         });
         const events = res.data?.events || [];
         events.forEach((evt) => {
-          console.log(
-            `[BACKEND][${evt.level || "info"}] ${evt.event || "event"}`,
-            evt.payload || {}
-          );
+          handleBackendEvent(evt);
         });
       } catch (error) {
         console.error("[BACKEND][events] polling_error", error?.message || error);
+      }
+    }, 1500);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      try {
+        const res = await axios.get(`${API_URL}/graph`, {
+          params: { limit_nodes: 60, limit_edges: 120, user_id: USER_ID },
+        });
+        const nodes = res.data?.nodes || [];
+        const edges = res.data?.edges || [];
+        setGraphData({ nodes, edges });
+      } catch (error) {
+        console.error("[FRONTEND][graph] polling_error", error?.message || error);
       }
     }, 1500);
 
@@ -69,14 +265,12 @@ function App() {
     setCommentText("");
 
     try {
-      console.log("[FRONTEND] sending_chat", { query: userMessage.content, user_id: USER_ID });
       const response = await axios.post(`${API_URL}/chat`, {
         query: userMessage.content,
         user_id: USER_ID,
       });
 
       const data = response.data;
-      console.log("[FRONTEND] chat_response", data);
 
       const botMessage = {
         role: "bot",
@@ -103,7 +297,6 @@ function App() {
       const finalComment =
         score === 1 ? "Usuario satisfecho" : cleanComment || "Error reportado";
 
-      console.log("[FRONTEND] sending_feedback", { runId, score, finalComment });
       await axios.post(`${API_URL}/feedback`, {
         run_id: runId,
         score,
@@ -142,6 +335,42 @@ function App() {
       sendMessage();
     }
   };
+
+  const graphLayout = useMemo(() => {
+    const width = GRAPH_CANVAS.width;
+    const height = GRAPH_CANVAS.height;
+    const nodes = graphData.nodes || [];
+    if (!nodes.length) {
+      return { width, height, nodes: [], edges: [] };
+    }
+    const radius = Math.min(width, height) / 2 - 22;
+    const centerX = width / 2;
+    const centerY = height / 2;
+    const positionedNodes = nodes.map((node, idx) => {
+      const angle = (Math.PI * 2 * idx) / nodes.length - Math.PI / 2;
+      return {
+        ...node,
+        x: Math.round(centerX + Math.cos(angle) * radius),
+        y: Math.round(centerY + Math.sin(angle) * radius),
+      };
+    });
+    const nodeMap = new Map(positionedNodes.map((node) => [node.id, node]));
+    const edges = (graphData.edges || []).filter(
+      (edge) => nodeMap.has(edge.from) && nodeMap.has(edge.to)
+    );
+    return { width, height, nodes: positionedNodes, edges };
+  }, [graphData]);
+
+  const isScanning = graphMeta.status === "active" && graphPulses.length > 0;
+  const highlightedSet = useMemo(() => new Set(highlightedNodeIds), [highlightedNodeIds]);
+  const highlightedEdgeSet = useMemo(() => {
+    const set = new Set();
+    highlightedEdges.forEach((e) => {
+      set.add(`${e.from}|${e.to}`);
+      set.add(`${e.to}|${e.from}`); // bidireccional
+    });
+    return set;
+  }, [highlightedEdges]);
 
   return (
     <div className="app-container">
@@ -249,6 +478,100 @@ function App() {
           </button>
         </div>
       </div>
+
+      <aside className="graph-overlay" aria-live="polite">
+        <div className="graph-card">
+          <div className="graph-header">
+            <div className="graph-title">Grafo en vivo</div>
+            <div className={`graph-status ${graphMeta.status}`}>
+              {graphMeta.status === "active" ? "Buscando" : "En espera"}
+            </div>
+          </div>
+
+          <svg
+            className="graph-canvas"
+            viewBox={`0 0 ${graphLayout.width} ${graphLayout.height}`}
+            role="img"
+            aria-label="Visualizacion de busqueda en el grafo"
+          >
+            {graphLayout.edges.map((edge) => {
+              const isActive = isScanning;
+              const edgeKey = `${edge.from}|${edge.to}`;
+              const isEdgeHighlighted = highlightedEdgeSet.has(edgeKey);
+              const isNodeHighlighted = highlightedSet.has(edge.from) || highlightedSet.has(edge.to);
+              const source = graphLayout.nodes.find((n) => n.id === edge.from);
+              const target = graphLayout.nodes.find((n) => n.id === edge.to);
+              if (!source || !target) return null;
+              return (
+                <line
+                  key={`${edge.from}-${edge.to}`}
+                  x1={source.x}
+                  y1={source.y}
+                  x2={target.x}
+                  y2={target.y}
+                  className={`graph-edge ${isActive ? "active" : ""} ${isEdgeHighlighted ? "highlight-edge" : ""} ${isNodeHighlighted ? "highlight" : ""}`}
+                />
+              );
+            })}
+
+            {graphLayout.nodes.map((node, idx) => {
+              const isActive = isScanning;
+              const isHighlighted = highlightedSet.has(node.id);
+              const isSeed = idx === 0 || (searchDepth === 0 && isHighlighted);
+              return (
+                <g 
+                  key={node.id} 
+                  className={`graph-node ${isActive ? "active" : ""} ${isHighlighted ? "highlight" : ""} ${isSeed && isHighlighted ? "seed" : ""}`}
+                >
+                  <circle cx={node.x} cy={node.y} r={isSeed ? 12 : 8} />
+                  {isHighlighted && (
+                    <circle 
+                      cx={node.x} 
+                      cy={node.y} 
+                      r={isSeed ? 16 : 12} 
+                      className="pulse-ring" 
+                    />
+                  )}
+                  <title>{node.label || "Nodo"}</title>
+                </g>
+              );
+            })}
+          </svg>
+
+          <div className="graph-meta">
+            <div className="graph-meta-row">
+              <span className="meta-label">Tool</span>
+              <span className="meta-value">{graphMeta.activeTool || "-"}</span>
+            </div>
+            <div className="graph-meta-row">
+              <span className="meta-label">Depth</span>
+              <span className="meta-value depth-indicator">
+                {graphMeta.currentDepth >= 0 ? `🔍 ${graphMeta.currentDepth}` : "-"}
+              </span>
+            </div>
+            <div className="graph-meta-row">
+              <span className="meta-label">Nodos</span>
+              <span className="meta-value">
+                {highlightedNodeIds.length > 0 
+                  ? `${highlightedNodeIds.length} / ${graphData.nodes.length}` 
+                  : graphData.nodes.length}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div className="graph-log">
+          {graphSteps.length === 0 && (
+            <div className="graph-log-empty">Esperando pasos de fase 4...</div>
+          )}
+          {graphSteps.map((step) => (
+            <div key={step.id} className={`graph-log-item ${step.level}`}>
+              {step.text}
+            </div>
+          ))}
+        </div>
+
+      </aside>
     </div>
   );
 }
