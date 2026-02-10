@@ -57,6 +57,7 @@ function App() {
   const lastEventsErrorRef = useRef(0);
   const lastGraphErrorRef = useRef(0);
   const backendDownRef = useRef(false);
+  const activeToolRef = useRef("");
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -121,6 +122,20 @@ function App() {
     queuePulse(0, label, 0);
     queuePulse(1, label, 220);
     queuePulse(2, label, 440);
+  };
+
+  const resetGraphHighlights = () => {
+    flowTimersRef.current.forEach((timer) => clearTimeout(timer));
+    flowTimersRef.current = [];
+
+    if (highlightTimerRef.current) {
+      clearTimeout(highlightTimerRef.current);
+      highlightTimerRef.current = null;
+    }
+
+    setSearchDepth(-1);
+    setHighlightedNodeIds([]);
+    setHighlightedEdges([]);
   };
 
   const animateFlowFromSeed = (nodeIdsRaw, edgesRaw = []) => {
@@ -221,6 +236,7 @@ function App() {
   const handleBackendEvent = (evt) => {
     if (!evt || !evt.event) return;
     const payload = evt.payload || {};
+    const isGraphToolActive = GRAPH_SEARCH_TOOLS.has(activeToolRef.current);
 
     if (evt.event === "function_selected") {
       const label = payload.selected_function || "?";
@@ -236,6 +252,7 @@ function App() {
     if (evt.event === "queue_step_start") {
       const tool = payload.tool || "tool";
       clearNonFunctionSteps();
+      activeToolRef.current = tool;
       setGraphMeta((prev) => ({
         ...prev,
         activeTool: tool,
@@ -245,10 +262,12 @@ function App() {
 
       if (GRAPH_SEARCH_TOOLS.has(tool)) {
         // Limpiar highlights anteriores al iniciar nueva búsqueda
-        setHighlightedNodeIds([]);
-        setHighlightedEdges([]);
-        setSearchDepth(-1);
+        resetGraphHighlights();
         triggerGraphSearch(tool, payload.trace_id);
+      } else {
+        // Para tools no relacionadas con grafo, no mostrar nodos resaltados.
+        resetGraphHighlights();
+        setGraphMeta((prev) => ({ ...prev, status: "idle", currentDepth: -1, lastEvent: Date.now() }));
       }
       return;
     }
@@ -268,6 +287,9 @@ function App() {
 
     // Evento de paso de búsqueda BFS (nuevo - animación progresiva)
     if (evt.event === "graph_search_step") {
+      if (!isGraphToolActive) {
+        return;
+      }
       const depth = payload.depth ?? 0;
       const nodeIds = Array.isArray(payload.node_ids)
         ? payload.node_ids.map(normalizeGraphId)
@@ -310,6 +332,9 @@ function App() {
     
     // Evento de búsqueda completada
     if (evt.event === "graph_search_complete") {
+      if (!isGraphToolActive) {
+        return;
+      }
       const nodeIds = Array.isArray(payload.node_ids)
         ? payload.node_ids.map(normalizeGraphId)
         : [];
@@ -335,6 +360,9 @@ function App() {
 
     // Evento legacy (por compatibilidad)
     if (evt.event === "graph_search_result") {
+      if (!isGraphToolActive) {
+        return;
+      }
       const nodeIds = Array.isArray(payload.node_ids)
         ? payload.node_ids.map(normalizeGraphId)
         : [];
