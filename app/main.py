@@ -1282,6 +1282,48 @@ def _fallback_plan(router_label: str, user_id: str, state: Dict[str, Any]) -> Di
     return {"steps": []}
 
 
+def _query_explicitly_mentions_product(query_text: str) -> bool:
+    """Heurística: detecta si el usuario mencionó explícitamente un producto/id/ordinal."""
+    q = (query_text or "").lower()
+    patterns = [
+        r"\b[A-Za-z]\d+\b",                  # ids tipo A1, L2
+        r"\b(la|el)\s+(primera|primero|segunda|segundo|tercera|tercero|cuarta|cuarto)\b",
+        r"\bopci[oó]n\s*\d+\b",
+        r"\blaptop\b", r"\bmac\b", r"\bmacbook\b", r"\blenovo\b", r"\bdell\b",
+        r"\bmouse\b", r"\bmonitor\b", r"\baud[ií]fonos\b", r"\bteclado\b",
+    ]
+    return any(re.search(pat, q) for pat in patterns)
+
+
+def _sanitize_plan_for_user_intent(plan: Dict[str, Any], query_text: str) -> Dict[str, Any]:
+    """Evita autocompletar agregar_al_carrito con producto implícito cuando el usuario no lo pidió."""
+    steps = plan.get("steps", []) if isinstance(plan, dict) else []
+    if not isinstance(steps, list):
+        return plan
+
+    explicit_product = _query_explicitly_mentions_product(query_text)
+    normalized_q = (query_text or "").lower()
+    asks_add_to_cart = any(tok in normalized_q for tok in ["agrega", "añade", "anade", "carrito", "me llevo"])
+
+    sanitized_steps = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        tool = step.get("tool")
+        args = step.get("args", {}) if isinstance(step.get("args"), dict) else {}
+
+        if tool == "agregar_al_carrito" and asks_add_to_cart and not explicit_product:
+            # Fuerza aclaración del producto: la tool responderá preguntando qué agregar.
+            args = dict(args)
+            args["producto_ref"] = ""
+            step = {"tool": tool, "args": args}
+
+        sanitized_steps.append(step)
+
+    plan["steps"] = sanitized_steps
+    return plan
+
+
 def planificar(query_text: str, router_label: str, user_id: str, state: Dict[str, Any]) -> Dict[str, Any]:
     """Genera un plan JSON con herramientas a ejecutar."""
     prompt = (
@@ -1301,6 +1343,8 @@ def planificar(query_text: str, router_label: str, user_id: str, state: Dict[str
         for s in plan["steps"]:
             if isinstance(s, dict) and isinstance(s.get("args"), dict):
                 s["args"]["user_id"] = user_id
+
+        plan = _sanitize_plan_for_user_intent(plan, query_text)
 
         if not plan.get("steps"):
             fallback = _fallback_plan(router_label, user_id, state)

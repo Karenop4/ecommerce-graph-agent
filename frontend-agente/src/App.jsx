@@ -5,7 +5,16 @@ import { ArrowUp, User, Bot, ThumbsUp, ThumbsDown, Send } from "lucide-react";
 import "./App.css";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
-const USER_ID = "usuario_demo";
+const resolveUserId = () => {
+  const key = "ecommerce_agent_user_id";
+  const existing = window.sessionStorage.getItem(key);
+  if (existing) return existing;
+  const generated = `usuario_${Math.random().toString(16).slice(2, 10)}`;
+  window.sessionStorage.setItem(key, generated);
+  return generated;
+};
+
+const USER_ID = resolveUserId();
 
 const GRAPH_SEARCH_TOOLS = new Set([
   "buscar_productos",
