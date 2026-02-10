@@ -235,6 +235,7 @@ function App() {
   const handleBackendEvent = (evt) => {
     if (!evt || !evt.event) return;
     const payload = evt.payload || {};
+    const isGraphToolActive = GRAPH_SEARCH_TOOLS.has(graphMeta.activeTool);
 
     if (evt.event === "function_selected") {
       const label = payload.selected_function || "?";
@@ -284,6 +285,9 @@ function App() {
 
     // Evento de paso de búsqueda BFS (nuevo - animación progresiva)
     if (evt.event === "graph_search_step") {
+      if (!isGraphToolActive) {
+        return;
+      }
       const depth = payload.depth ?? 0;
       const nodeIds = Array.isArray(payload.node_ids)
         ? payload.node_ids.map(normalizeGraphId)
@@ -326,6 +330,9 @@ function App() {
     
     // Evento de búsqueda completada
     if (evt.event === "graph_search_complete") {
+      if (!isGraphToolActive) {
+        return;
+      }
       const nodeIds = Array.isArray(payload.node_ids)
         ? payload.node_ids.map(normalizeGraphId)
         : [];
@@ -351,6 +358,9 @@ function App() {
 
     // Evento legacy (por compatibilidad)
     if (evt.event === "graph_search_result") {
+      if (!isGraphToolActive) {
+        return;
+      }
       const nodeIds = Array.isArray(payload.node_ids)
         ? payload.node_ids.map(normalizeGraphId)
         : [];
