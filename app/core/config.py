@@ -13,6 +13,7 @@ class Settings:
     redis_ttl_seconds: int
     mlflow_tracking_uri: str
     mlflow_experiment: str
+    tools_print_only: bool
 
 
 def load_settings() -> Settings:
@@ -27,4 +28,5 @@ def load_settings() -> Settings:
         redis_ttl_seconds=int(os.getenv("REDIS_TTL_SECONDS", "86400")),
         mlflow_tracking_uri=os.getenv("MLFLOW_TRACKING_URI") or "http://localhost:5000",
         mlflow_experiment="Agente_Produccion_Conversacional_Redis",
+        tools_print_only=os.getenv("TOOLS_PRINT_ONLY", "false").lower() in {"1", "true", "yes", "on"},
     )

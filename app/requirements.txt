@@ -11,10 +11,10 @@ neo4j
 langchain
 langchain-core
 langchain-openai
+langgraph
 openai
 
 # --- Embeddings (Modelo Local) ---
-# Nota: Esto instalará PyTorch y puede ser pesado (aprox 700MB-1GB)
 sentence-transformers
 
 # --- MLOps y Registro ---
