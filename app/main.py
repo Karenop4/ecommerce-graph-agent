@@ -170,6 +170,34 @@ INTENT_KEYWORDS = {
 }
 
 
+
+SOFT_INTENT_PATTERNS = {
+    "browse_products": [
+        r"\brecomiend",
+        r"\bauricular(?:es)?\b",
+        r"\baud[ií]fono(?:s)?\b",
+        r"\blaptop\b",
+        r"\bmonitor\b",
+        r"\bmouse\b",
+        r"\bquiero (ver|buscar|explorar)\b",
+        r"\bmu[eé]strame\b",
+    ],
+    "choose_option": [
+        r"\bopci[oó]n\s*\d+\b",
+        r"\bla\s+(primera|segunda|tercera)\b",
+        r"\b(el|la)\s+\d+\b",
+    ],
+    "add_to_cart": [r"\bagrega\b", r"\bañade\b", r"\banade\b", r"\bcarrito\b", r"\bme llevo\b"],
+    "remove_from_cart": [r"\bquita\b", r"\bremueve\b", r"\bsaca\b", r"\belimina\b"],
+    "view_cart": [r"\bver carrito\b", r"\bmi carrito\b", r"\bque tengo\b", r"\bcarrito\b"],
+    "purchase_or_stock": [r"\bstock\b", r"\bdisponibilidad\b", r"\bcomprar\b", r"\bd[oó]nde comprar\b"],
+    "store_contact": [r"\bwhatsapp\b", r"\btel[eé]fono\b", r"\bdirecci[oó]n\b", r"\bhorario\b", r"\blocal(?:es)?\b", r"\btienda(?:s)?\b"],
+    "finalize_purchase": [r"\bfinaliza(r)?\b", r"\bfinalizar compra\b", r"\bproceder a compra\b", r"\bhaz la compra\b"],
+    "user_correction": [r"\best[aá] mal\b", r"\bcorrige\b", r"\bno es as[ií]\b", r"\berror\b"],
+}
+SOFT_PATTERN_BOOST = 0.07
+MAX_SOFT_BOOST = 0.21
+
 def cosine_sim(a, b) -> float:
     return float(sum(x * y for x, y in zip(a, b)))
 
@@ -196,6 +224,16 @@ def seleccionar_funcion(query_text: str, query_vec_norm: List[float]) -> Tuple[s
         if label in ROUTER_LABELS:
             idx = ROUTER_LABELS.index(label)
             adjusted_sims[idx] = adjusted_sims[idx] - penalty
+
+    # Ajuste léxico suave para mejorar certeza del intent sin depender solo del embedding de labels.
+    for label, patterns in SOFT_INTENT_PATTERNS.items():
+        if label not in ROUTER_LABELS:
+            continue
+        hits = sum(1 for pat in patterns if re.search(pat, normalized))
+        if hits <= 0:
+            continue
+        idx = ROUTER_LABELS.index(label)
+        adjusted_sims[idx] = adjusted_sims[idx] + min(MAX_SOFT_BOOST, hits * SOFT_PATTERN_BOOST)
 
     ranked = sorted(
         [(i, float(adjusted_sims[i])) for i in range(len(adjusted_sims))],
