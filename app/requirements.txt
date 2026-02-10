@@ -11,6 +11,7 @@ neo4j
 langchain
 langchain-core
 langchain-openai
+langgraph
 openai
 
 # --- Embeddings (Modelo Local) ---

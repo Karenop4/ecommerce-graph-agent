@@ -5,7 +5,7 @@ import time
 import logging
 from datetime import datetime, timezone
 from time import perf_counter
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TypedDict
 
 import mlflow
 import langchain
@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, SystemMessage
+from langgraph.graph import END, StateGraph
 
 from neo4j import GraphDatabase
 from neo4j.exceptions import ServiceUnavailable
@@ -51,6 +52,7 @@ NEO4J_URI = settings.neo4j_uri
 NEO4J_AUTH = settings.neo4j_auth
 REDIS_URL = settings.redis_url
 REDIS_TTL_SECONDS = settings.redis_ttl_seconds
+TOOLS_PRINT_ONLY = settings.tools_print_only
 
 mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
 mlflow.set_experiment(settings.mlflow_experiment)
@@ -63,6 +65,7 @@ llm: Optional[ChatOpenAI] = None
 driver = None
 rdb = None
 GRAPH_HIGHLIGHTS: Dict[str, List[str]] = {}
+ORCHESTRATION_GRAPH = None
 
 
 # ----------------------------------------------------------------------
@@ -182,7 +185,7 @@ def seleccionar_funcion(query_text: str, query_vec_norm: List[float]) -> Tuple[s
 @app.on_event("startup")
 def on_startup():
     """Inicializa recursos pesados en startup (mejor para Docker y --reload)."""
-    global embedder, llm, driver, rdb, ROUTER_EMBEDS
+    global embedder, llm, driver, rdb, ROUTER_EMBEDS, ORCHESTRATION_GRAPH
 
     logger.info("🚀 --- STARTUP ---")
 
@@ -203,6 +206,9 @@ def on_startup():
     # Router embeds una sola vez
     ROUTER_EMBEDS = embedder.encode(ROUTER_LABELS, normalize_embeddings=True).tolist()
     logger.info("✅ [INIT] Router embeds precalculados")
+
+    ORCHESTRATION_GRAPH = build_orchestration_graph()
+    logger.info("✅ [INIT] Orquestación LangGraph lista")
 
     if "localhost" in (REDIS_URL or ""):
         logger.warning("⚠️ REDIS_URL usa localhost. En Docker debe ser redis://redis:6379/0 (nombre del servicio).")
@@ -1147,6 +1153,50 @@ def planificar(query_text: str, router_label: str, user_id: str, state: Dict[str
         return {"steps": []}
 
 
+def _simulate_tool_execution(tool_name: str, args: Dict[str, Any]) -> str:
+    """Simula ejecución de tools con logs tipo print para demos."""
+    user_id = args.get("user_id", "usuario_demo")
+    steps = [
+        f"{tool_name}() - print('iniciando ejecución')",
+        f"{tool_name}() - print('args={json.dumps(args, ensure_ascii=False)}')",
+        f"{tool_name}() - print('finalizando ejecución')",
+    ]
+    for line in steps:
+        logger.info(line)
+    return f"✅ [SIMULADO] {tool_name} completado para {user_id}"
+
+
+def _invoke_tool(tool_name: str, args: Dict[str, Any]) -> Any:
+    if TOOLS_PRINT_ONLY:
+        return _simulate_tool_execution(tool_name, args)
+
+    if tool_name == "buscar_productos":
+        return buscar_productos.invoke(args)
+    if tool_name == "seleccionar_opcion":
+        return seleccionar_opcion.invoke(args)
+    if tool_name == "agregar_al_carrito":
+        return agregar_al_carrito.invoke(args)
+    if tool_name == "remover_del_carrito":
+        return remover_del_carrito.invoke(args)
+    if tool_name == "ver_carrito":
+        return ver_carrito.invoke(args)
+    if tool_name == "vaciar_carrito":
+        return vaciar_carrito.invoke(args)
+    if tool_name == "verificar_stock":
+        return verificar_stock.invoke(args)
+    if tool_name == "verificar_stock_carrito":
+        return verificar_stock_carrito.invoke(args)
+    if tool_name == "obtener_contacto_tienda":
+        return obtener_contacto_tienda.invoke(args)
+    if tool_name == "finalizar_compra":
+        return finalizar_compra.invoke(args)
+    if tool_name == "registrar_correccion":
+        return registrar_correccion.invoke(args)
+    if tool_name == "buscar_relaciones_grafo":
+        return buscar_relaciones_grafo.invoke(args)
+    return f"Tool desconocida: {tool_name}"
+
+
 # ----------------------------------------------------------------------
 # 6) EXECUTOR (FASE 4)
 # ----------------------------------------------------------------------
@@ -1178,32 +1228,7 @@ def ejecutar_plan(plan: Dict[str, Any], user_id: str, trace_id: str, initial_res
         logger.info(f"Fase 4: paso {human_idx}/{len(steps)} {tool_name}")
 
         try:
-            if tool_name == "buscar_productos":
-                out = buscar_productos.invoke(args)
-            elif tool_name == "seleccionar_opcion":
-                out = seleccionar_opcion.invoke(args)
-            elif tool_name == "agregar_al_carrito":
-                out = agregar_al_carrito.invoke(args)
-            elif tool_name == "remover_del_carrito":
-                out = remover_del_carrito.invoke(args)
-            elif tool_name == "ver_carrito":
-                out = ver_carrito.invoke(args)
-            elif tool_name == "vaciar_carrito":
-                out = vaciar_carrito.invoke(args)
-            elif tool_name == "verificar_stock":
-                out = verificar_stock.invoke(args)
-            elif tool_name == "verificar_stock_carrito":
-                out = verificar_stock_carrito.invoke(args)
-            elif tool_name == "obtener_contacto_tienda":
-                out = obtener_contacto_tienda.invoke(args)
-            elif tool_name == "finalizar_compra":
-                out = finalizar_compra.invoke(args)
-            elif tool_name == "registrar_correccion":
-                out = registrar_correccion.invoke(args)
-            elif tool_name == "buscar_relaciones_grafo":
-                out = buscar_relaciones_grafo.invoke(args)
-            else:
-                out = f"Tool desconocida: {tool_name}"
+            out = _invoke_tool(tool_name, args)
 
             results.append({"tool": tool_name, "args": args, "output": out})
             emit_event(user_id, "info", "queue_step_done", {
@@ -1337,57 +1362,121 @@ def redactar_respuesta(query_text: str, tool_results: List[Dict[str, Any]], stat
 # ----------------------------------------------------------------------
 # 8) PIPELINE 1→5
 # ----------------------------------------------------------------------
-def ejecutar_pipeline(query_text: str, trace_id: str, user_id: str) -> Dict[str, Any]:
-    """Ejecuta pipeline: embedding -> router -> planner -> tools -> responder."""
-    state = get_state(user_id)
+class PipelineState(TypedDict, total=False):
+    query_text: str
+    trace_id: str
+    user_id: str
+    state: Dict[str, Any]
+    q_vec: List[float]
+    router_label: str
+    router_score: float
+    sims: List[float]
+    router_strategy: str
+    plan: Dict[str, Any]
+    tool_results: List[Dict[str, Any]]
+    state_after: Dict[str, Any]
+    response: str
+
+
+def node_embedding(state: PipelineState) -> PipelineState:
+    query_text = state["query_text"]
     logger.info(f"Fase 1: query = \"{query_text}\"")
     q_vec = embedder.encode(query_text, normalize_embeddings=True).tolist()
     logger.info("Fase 2: embedding")
+    return {"q_vec": q_vec, "state": get_state(state["user_id"])}
 
-    router_label, router_score, sims, router_strategy = seleccionar_funcion(query_text, q_vec)
+
+def node_function_selection(state: PipelineState) -> PipelineState:
+    router_label, router_score, sims, router_strategy = seleccionar_funcion(state["query_text"], state["q_vec"])
     ranked = sorted(
         [{"label": ROUTER_LABELS[i], "score": float(sims[i])} for i in range(len(ROUTER_LABELS))],
         key=lambda x: x["score"],
         reverse=True,
     )
-    top3 = ranked[:3]
     emit_event(
-        user_id,
+        state["user_id"],
         "info",
         "function_selected",
         {
-            "trace_id": trace_id,
+            "trace_id": state["trace_id"],
             "selected_function": router_label,
             "selected_score": round(float(router_score), 4),
             "selection_strategy": router_strategy,
-            "top_candidates": top3,
+            "top_candidates": ranked[:3],
         },
     )
     logger.info(f"Fase 3: Function selection = \"{router_label}\" (score={round(float(router_score), 4)})")
+    update_state(state["user_id"], {"last_intent": router_label})
+    return {
+        "router_label": router_label,
+        "router_score": router_score,
+        "sims": sims,
+        "router_strategy": router_strategy,
+    }
 
-    update_state(user_id, {"last_intent": router_label})
 
+def node_plan(state: PipelineState) -> PipelineState:
     logger.info("Fase 4: planificacion")
-    plan = planificar(query_text, router_label, user_id, state)
+    plan = planificar(state["query_text"], state["router_label"], state["user_id"], state["state"])
     plan_tools = [step.get("tool") for step in plan.get("steps", []) if isinstance(step, dict)]
     logger.info(f"Fase 4: plan = {plan_tools}")
+    return {"plan": plan}
 
-    emit_event(user_id, "info", "phase_4_start", {"trace_id": trace_id})
-    tool_results = ejecutar_o_reanudar_cola(plan, user_id=user_id, trace_id=trace_id)
-    emit_event(user_id, "info", "phase_4_done", {"trace_id": trace_id, "tools": len(tool_results)})
 
-    state_after = get_state(user_id)
+def node_execute(state: PipelineState) -> PipelineState:
+    emit_event(state["user_id"], "info", "phase_4_start", {"trace_id": state["trace_id"]})
+    tool_results = ejecutar_o_reanudar_cola(state["plan"], user_id=state["user_id"], trace_id=state["trace_id"])
+    emit_event(state["user_id"], "info", "phase_4_done", {"trace_id": state["trace_id"], "tools": len(tool_results)})
+    return {"tool_results": tool_results, "state_after": get_state(state["user_id"])}
 
+
+def node_response(state: PipelineState) -> PipelineState:
     logger.info("Fase 5: respuesta")
-    response = redactar_respuesta(query_text, tool_results, state_after)
+    response = redactar_respuesta(state["query_text"], state["tool_results"], state["state_after"])
     logger.info("Fase 5: respuesta OK")
+    return {"response": response}
+
+
+def build_orchestration_graph():
+    builder = StateGraph(PipelineState)
+    builder.add_node("embedding", node_embedding)
+    builder.add_node("function_selection", node_function_selection)
+    builder.add_node("plan", node_plan)
+    builder.add_node("execute", node_execute)
+    builder.add_node("response", node_response)
+
+    builder.set_entry_point("embedding")
+    builder.add_edge("embedding", "function_selection")
+    builder.add_edge("function_selection", "plan")
+    builder.add_edge("plan", "execute")
+    builder.add_edge("execute", "response")
+    builder.add_edge("response", END)
+    return builder.compile()
+
+
+def ejecutar_pipeline(query_text: str, trace_id: str, user_id: str) -> Dict[str, Any]:
+    """Ejecuta pipeline orquestado con LangGraph: embedding -> router -> planner -> tools -> responder."""
+    global ORCHESTRATION_GRAPH
+    if ORCHESTRATION_GRAPH is None:
+        ORCHESTRATION_GRAPH = build_orchestration_graph()
+
+    result = ORCHESTRATION_GRAPH.invoke({
+        "query_text": query_text,
+        "trace_id": trace_id,
+        "user_id": user_id,
+    })
 
     return {
-        "response": response,
-        "router": {"label": router_label, "score": router_score, "sims": sims, "strategy": router_strategy},
-        "plan": plan,
-        "tool_results": tool_results,
-        "state": state_after,
+        "response": result["response"],
+        "router": {
+            "label": result["router_label"],
+            "score": result["router_score"],
+            "sims": result["sims"],
+            "strategy": result["router_strategy"],
+        },
+        "plan": result["plan"],
+        "tool_results": result["tool_results"],
+        "state": result["state_after"],
     }
 
 
