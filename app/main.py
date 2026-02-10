@@ -375,41 +375,64 @@ def emit_graph_highlight_for_tool(user_id: str, tool_name: str, args: Dict[str, 
     if not product_ids and not store_names:
         return
 
-    cypher = """
-    OPTIONAL MATCH (p:Producto)
+    cypher_products = """
+    MATCH (p:Producto)
     WHERE p.id IN $product_ids
     OPTIONAL MATCH (p)-[rp]-(pn)
-    WITH collect(DISTINCT p) AS ps,
-         collect(DISTINCT {from: elementId(p), to: elementId(pn), type: type(rp)}) AS p_edges,
-         collect(DISTINCT pn) AS p_neighbors
-    OPTIONAL MATCH (t:Tienda)
+    RETURN
+      collect(DISTINCT elementId(p)) + collect(DISTINCT elementId(pn)) AS node_ids,
+      collect(DISTINCT {from: elementId(p), to: elementId(pn), type: type(rp)}) AS edges
+    """
+
+    cypher_stores = """
+    MATCH (t:Tienda)
     WHERE toLower(t.nombre) IN $store_names_lower
     OPTIONAL MATCH (t)-[rt]-(tn)
     RETURN
-      [n IN ps WHERE n IS NOT NULL | elementId(n)] +
-      [n IN p_neighbors WHERE n IS NOT NULL | elementId(n)] +
-      [n IN collect(DISTINCT t) WHERE n IS NOT NULL | elementId(n)] +
-      [n IN collect(DISTINCT tn) WHERE n IS NOT NULL | elementId(n)] AS node_ids,
-      [e IN p_edges WHERE e.from IS NOT NULL AND e.to IS NOT NULL] +
-      [e IN collect(DISTINCT {from: elementId(t), to: elementId(tn), type: type(rt)})
-       WHERE e.from IS NOT NULL AND e.to IS NOT NULL] AS edges
+      collect(DISTINCT elementId(t)) + collect(DISTINCT elementId(tn)) AS node_ids,
+      collect(DISTINCT {from: elementId(t), to: elementId(tn), type: type(rt)}) AS edges
     """
 
     store_names_lower = [s.lower() for s in store_names]
 
     try:
+        node_ids: List[str] = []
+        edges: List[Dict[str, Any]] = []
         with driver.session() as session:
-            row = session.run(
-                cypher,
-                product_ids=list(product_ids),
-                store_names_lower=store_names_lower,
-            ).single()
+            if product_ids:
+                row_products = session.run(
+                    cypher_products,
+                    product_ids=list(product_ids),
+                ).single()
+                if row_products:
+                    node_ids.extend(row_products.get("node_ids") or [])
+                    edges.extend(row_products.get("edges") or [])
 
-        if not row:
-            return
+            if store_names_lower:
+                row_stores = session.run(
+                    cypher_stores,
+                    store_names_lower=store_names_lower,
+                ).single()
+                if row_stores:
+                    node_ids.extend(row_stores.get("node_ids") or [])
+                    edges.extend(row_stores.get("edges") or [])
 
-        node_ids = list(dict.fromkeys(row.get("node_ids") or []))
-        edges = row.get("edges") or []
+        node_ids = list(dict.fromkeys([n for n in node_ids if n]))
+        edge_seen = set()
+        dedup_edges = []
+        for e in edges:
+            if not isinstance(e, dict):
+                continue
+            from_id = e.get("from")
+            to_id = e.get("to")
+            if not from_id or not to_id:
+                continue
+            key = f"{from_id}|{to_id}|{e.get('type') or ''}"
+            if key in edge_seen:
+                continue
+            edge_seen.add(key)
+            dedup_edges.append({"from": from_id, "to": to_id, "type": e.get("type")})
+
         if not node_ids:
             return
 
@@ -417,7 +440,7 @@ def emit_graph_highlight_for_tool(user_id: str, tool_name: str, args: Dict[str, 
         emit_event(user_id, "info", "graph_search_complete", {
             "source_tool": tool_name,
             "node_ids": node_ids,
-            "edges": edges,
+            "edges": dedup_edges,
             "total_depth": 1,
         })
     except Exception as e:
