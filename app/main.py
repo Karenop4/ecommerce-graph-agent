@@ -1626,47 +1626,102 @@ Reglas:
 """
 
 
+def _naturalize_generic_text(text: str) -> str:
+    clean = (text or "")
+    clean = re.sub(r"\s*\[[A-Za-z]\d+\]", "", clean)
+    clean = re.sub(r"^Opciones encontradas \(aún sin ver stock\):\n?", "", clean.strip(), flags=re.MULTILINE)
+    clean = re.sub(r"\n{3,}", "\n\n", clean)
+    return clean.strip()
+
+
+def _parse_product_options(output: str) -> List[Dict[str, Any]]:
+    lines = (output or "").splitlines()
+    items: List[Dict[str, Any]] = []
+    i = 0
+    pattern = re.compile(r"^\s*\d+\)\s*\[([^\]]+)\]\s*(.+?)\s*\(\$([0-9]+(?:\.[0-9]+)?)\)\s*$")
+    while i < len(lines):
+        line = lines[i].strip()
+        m = pattern.match(line)
+        if not m:
+            i += 1
+            continue
+        item = {"id": m.group(1), "nombre": m.group(2), "precio": m.group(3), "desc": "", "accesorios": []}
+        j = i + 1
+        while j < len(lines):
+            nxt = lines[j].strip()
+            if pattern.match(nxt):
+                break
+            if nxt.startswith("Desc:"):
+                item["desc"] = nxt.replace("Desc:", "").strip()
+            if "Accesorios:" in nxt:
+                acc = nxt.split("Accesorios:", 1)[1].strip()
+                if acc:
+                    item["accesorios"] = [a.strip() for a in acc.split(",") if a.strip()]
+            j += 1
+        items.append(item)
+        i = j
+    return items
+
+
+def _is_recommendation_query(query_text: str) -> bool:
+    q = (query_text or "").lower()
+    return any(tok in q for tok in ["recomiend", "recomendar", "sugiere", "mejor opción", "mejor opcion"]) 
+
+
+def _friendly_products_reply(query_text: str, output: str) -> str:
+    items = _parse_product_options(output)
+    if not items:
+        return f"¡Claro! 😊\n\n{_naturalize_generic_text(output)}"
+
+    if _is_recommendation_query(query_text):
+        top = items[0]
+        txt = (
+            f"¡Claro! 😊 Te recomiendo **{top['nombre']}** por su perfil empresarial.\n\n"
+            f"Precio estimado: ${top['precio']}\n"
+            f"Descripción: {top['desc'] or 'Excelente opción para productividad y trabajo diario.'}"
+        )
+        if top.get("accesorios"):
+            txt += f"\n\nSi quieres, también te sugiero combinarla con: {', '.join(top['accesorios'][:2])}."
+        txt += "\n\nSi te gusta, te la agrego al carrito."
+        return txt
+
+    lines = ["¡Claro! 😊 Estas son las opciones más relevantes que encontré:"]
+    for it in items[:3]:
+        lines.append(f"- {it['nombre']} (${it['precio']}): {it['desc']}")
+    lines.append("\nSi quieres, te ayudo a elegir la mejor según tu presupuesto o uso.")
+    return "\n".join(lines)
+
+
 def redactar_respuesta(query_text: str, tool_results: List[Dict[str, Any]], state: Dict[str, Any]) -> str:
     """Redacta respuesta final usando el contexto de herramientas."""
-    # Si hay salida de tools, priorizamos factualidad + tono amable (sin alucinaciones).
     if tool_results:
         outputs: List[str] = []
         seen = set()
         for r in tool_results:
             out = str(r.get("output", "")).strip()
-            if not out:
-                continue
-            if out in seen:
+            if not out or out in seen:
                 continue
             seen.add(out)
             outputs.append(out)
 
         if outputs:
             tools = [str(r.get("tool", "")) for r in tool_results]
-            combined = "\n\n".join(outputs)
+            merged = _naturalize_generic_text("\n".join(outputs))
 
-            # Respuestas amables por intención sin cambiar hechos de tools.
             if any(t == "buscar_productos" for t in tools):
-                return (
-                    "¡Claro! 😊 Te ayudo con gusto. Encontré estas opciones para ti:\n\n"
-                    f"{combined}\n\n"
-                    "Si quieres, te recomiendo una según tu presupuesto o uso (oficina, clases, diseño, etc.)."
-                )
+                return _friendly_products_reply(query_text, outputs[0])
 
             if any(t in {"agregar_al_carrito", "remover_del_carrito", "ver_carrito", "vaciar_carrito"} for t in tools):
                 return (
                     "¡Listo! 😊 Ya actualicé tu carrito:\n\n"
-                    f"{combined}\n\n"
+                    f"{merged}\n\n"
                     "Cuando quieras, te ayudo a revisar stock o continuar con la compra."
                 )
 
             if any(t in {"verificar_stock", "verificar_stock_carrito", "obtener_contacto_tienda", "finalizar_compra"} for t in tools):
-                return (
-                    "Perfecto 👍 Te comparto la información:\n\n"
-                    f"{combined}"
-                )
+                return "Perfecto 👍 Te comparto la información:\n\n" + merged
 
-            return f"¡Con gusto! 😊\n\n{combined}"
+            return f"¡Con gusto! 😊\n\n{merged}"
 
     contexto = ""
     for r in tool_results:
@@ -1681,7 +1736,6 @@ def redactar_respuesta(query_text: str, tool_results: List[Dict[str, Any]], stat
         ))
     ])
     return msg.content
-
 
 
 # ----------------------------------------------------------------------
