@@ -1628,6 +1628,21 @@ Reglas:
 
 def redactar_respuesta(query_text: str, tool_results: List[Dict[str, Any]], state: Dict[str, Any]) -> str:
     """Redacta respuesta final usando el contexto de herramientas."""
+    # Si hay salida de tools, priorizamos respuesta determinista para evitar alucinaciones.
+    if tool_results:
+        outputs: List[str] = []
+        seen = set()
+        for r in tool_results:
+            out = str(r.get("output", "")).strip()
+            if not out:
+                continue
+            if out in seen:
+                continue
+            seen.add(out)
+            outputs.append(out)
+        if outputs:
+            return "\n\n".join(outputs)
+
     contexto = ""
     for r in tool_results:
         contexto += f"[TOOL={r['tool']} ARGS={r['args']}]\n{r['output']}\n\n"
@@ -1641,6 +1656,7 @@ def redactar_respuesta(query_text: str, tool_results: List[Dict[str, Any]], stat
         ))
     ])
     return msg.content
+
 
 
 # ----------------------------------------------------------------------
