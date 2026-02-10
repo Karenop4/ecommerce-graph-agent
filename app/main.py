@@ -742,6 +742,10 @@ def agregar_al_carrito(producto_ref: str, qty: int = 1, user_id: str = "anonimo"
 
     qty = max(1, _safe_int(qty, 1))
 
+    # (0) referencia genérica al producto enfocado (ej: "la laptop")
+    if _is_generic_laptop_reference(ref) and state.get("selected_product_id"):
+        ref = str(state["selected_product_id"])
+
     # (1) ordinal con candidates
     idx = normalize_ordinal_to_index(ref)
     if idx is not None:
@@ -1333,7 +1337,20 @@ def _query_explicitly_mentions_product(query_text: str) -> bool:
     return any(re.search(pat, q) for pat in patterns)
 
 
-def _sanitize_plan_for_user_intent(plan: Dict[str, Any], query_text: str) -> Dict[str, Any]:
+def _is_generic_laptop_reference(text: str) -> bool:
+    t = (text or "").strip().lower()
+    patterns = [
+        r"^laptop$",
+        r"^la laptop$",
+        r"^esa laptop$",
+        r"^la compu$",
+        r"^la computadora$",
+        r"^notebook$",
+    ]
+    return any(re.search(pat, t) for pat in patterns)
+
+
+def _sanitize_plan_for_user_intent(plan: Dict[str, Any], query_text: str, state: Dict[str, Any]) -> Dict[str, Any]:
     """Evita autocompletar agregar_al_carrito con producto implícito cuando el usuario no lo pidió."""
     steps = plan.get("steps", []) if isinstance(plan, dict) else []
     if not isinstance(steps, list):
@@ -1344,16 +1361,34 @@ def _sanitize_plan_for_user_intent(plan: Dict[str, Any], query_text: str) -> Dic
     asks_add_to_cart = any(tok in normalized_q for tok in ["agrega", "añade", "anade", "carrito", "me llevo"])
 
     sanitized_steps = []
+    seen_add_refs = set()
+    selected_pid = (state or {}).get("selected_product_id")
+
     for step in steps:
         if not isinstance(step, dict):
             continue
         tool = step.get("tool")
         args = step.get("args", {}) if isinstance(step.get("args"), dict) else {}
 
-        if tool == "agregar_al_carrito" and asks_add_to_cart and not explicit_product:
-            # Fuerza aclaración del producto: la tool responderá preguntando qué agregar.
+        if tool == "agregar_al_carrito":
             args = dict(args)
-            args["producto_ref"] = ""
+            ref = (args.get("producto_ref") or "").strip()
+
+            if asks_add_to_cart and not explicit_product:
+                # Fuerza aclaración del producto: la tool responderá preguntando qué agregar.
+                args["producto_ref"] = ""
+
+            # Si el usuario dijo "la laptop" y ya hay foco seleccionado (ej: Dell), respétalo.
+            if selected_pid and _is_generic_laptop_reference(ref):
+                args["producto_ref"] = selected_pid
+
+            # Evita duplicados del mismo producto en la misma orden compuesta (ej: "laptop y mouse").
+            ref_key = (args.get("producto_ref") or "").strip().lower()
+            if ref_key and ref_key in seen_add_refs and " y " in normalized_q:
+                continue
+            if ref_key:
+                seen_add_refs.add(ref_key)
+
             step = {"tool": tool, "args": args}
 
         sanitized_steps.append(step)
@@ -1382,7 +1417,7 @@ def planificar(query_text: str, router_label: str, user_id: str, state: Dict[str
             if isinstance(s, dict) and isinstance(s.get("args"), dict):
                 s["args"]["user_id"] = user_id
 
-        plan = _sanitize_plan_for_user_intent(plan, query_text)
+        plan = _sanitize_plan_for_user_intent(plan, query_text, state)
 
         if not plan.get("steps"):
             fallback = _fallback_plan(router_label, user_id, state)
