@@ -4,7 +4,7 @@ import ReactMarkdown from "react-markdown";
 import { ArrowUp, User, Bot, ThumbsUp, ThumbsDown, Send } from "lucide-react";
 import "./App.css";
 
-const API_URL = "http://localhost:8000";
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 const USER_ID = "usuario_demo";
 
 const GRAPH_SEARCH_TOOLS = new Set([
@@ -53,6 +53,10 @@ function App() {
   const feedbackTextareaRef = useRef(null);
   const pulseTimersRef = useRef([]);
   const highlightTimerRef = useRef(null);
+  const flowTimersRef = useRef([]);
+  const lastEventsErrorRef = useRef(0);
+  const lastGraphErrorRef = useRef(0);
+  const backendDownRef = useRef(false);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -68,6 +72,8 @@ function App() {
     return () => {
       pulseTimersRef.current.forEach((timer) => clearTimeout(timer));
       pulseTimersRef.current = [];
+      flowTimersRef.current.forEach((timer) => clearTimeout(timer));
+      flowTimersRef.current = [];
       if (highlightTimerRef.current) {
         clearTimeout(highlightTimerRef.current);
       }
@@ -77,6 +83,14 @@ function App() {
   const addGraphStep = (text, level = "info") => {
     const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     setGraphSteps((prev) => [{ id, text, level }, ...prev].slice(0, 6));
+  };
+
+  const setFunctionStep = (label) => {
+    const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    setGraphSteps((prev) => {
+      const withoutFunction = prev.filter((step) => !step.text.startsWith("Function:"));
+      return [{ id, text: `Function: ${label}`, level: "info" }, ...withoutFunction].slice(0, 6);
+    });
   };
 
   const queuePulse = (depth, label, delayMs = 0) => {
@@ -105,14 +119,111 @@ function App() {
     queuePulse(2, label, 440);
   };
 
+  const animateFlowFromSeed = (nodeIdsRaw, edgesRaw = []) => {
+    const nodeIds = (Array.isArray(nodeIdsRaw) ? nodeIdsRaw : []).map(normalizeGraphId);
+    const edges = (Array.isArray(edgesRaw) ? edgesRaw : []).map((edge) => ({
+      from: normalizeGraphId(edge.from),
+      to: normalizeGraphId(edge.to),
+      type: edge.type,
+    }));
+
+    if (!nodeIds.length) return;
+
+    flowTimersRef.current.forEach((timer) => clearTimeout(timer));
+    flowTimersRef.current = [];
+
+    const seed = nodeIds[0];
+    const adjacency = new Map();
+    edges.forEach((edge) => {
+      if (!adjacency.has(edge.from)) adjacency.set(edge.from, new Set());
+      if (!adjacency.has(edge.to)) adjacency.set(edge.to, new Set());
+      adjacency.get(edge.from).add(edge.to);
+      adjacency.get(edge.to).add(edge.from);
+    });
+
+    const levels = [];
+    const visited = new Set([seed]);
+    let frontier = [seed];
+    levels.push(frontier);
+
+    while (frontier.length) {
+      const next = [];
+      frontier.forEach((id) => {
+        const neighbors = adjacency.get(id) || new Set();
+        neighbors.forEach((nb) => {
+          if (!visited.has(nb)) {
+            visited.add(nb);
+            next.push(nb);
+          }
+        });
+      });
+      if (!next.length) break;
+      levels.push(next);
+      frontier = next;
+    }
+
+    nodeIds.forEach((id) => {
+      if (!visited.has(id)) {
+        levels.push([id]);
+        visited.add(id);
+      }
+    });
+
+    setHighlightedNodeIds([]);
+    setHighlightedEdges([]);
+    setSearchDepth(0);
+    setGraphMeta((prev) => ({ ...prev, status: "active", currentDepth: 0, lastEvent: Date.now() }));
+
+    const edgeByLevel = levels.map((ids, idx) => {
+      const previousNodes = new Set(levels.slice(0, idx).flat());
+      const currentNodes = new Set(ids);
+      return edges.filter((edge) =>
+        (currentNodes.has(edge.from) && previousNodes.has(edge.to)) ||
+        (currentNodes.has(edge.to) && previousNodes.has(edge.from)) ||
+        (currentNodes.has(edge.from) && currentNodes.has(edge.to) && idx === 0)
+      );
+    });
+
+    levels.forEach((ids, idx) => {
+      const timer = setTimeout(() => {
+        setSearchDepth(idx);
+        setGraphMeta((prev) => ({ ...prev, status: "active", currentDepth: idx, lastEvent: Date.now() }));
+        setHighlightedNodeIds((prev) => {
+          const merged = new Set(prev);
+          ids.forEach((id) => merged.add(id));
+          return [...merged];
+        });
+        setHighlightedEdges((prev) => {
+          const seen = new Set(prev.map((e) => `${e.from}|${e.to}|${e.type || ""}`));
+          const merged = [...prev];
+          edgeByLevel[idx].forEach((edge) => {
+            const key = `${edge.from}|${edge.to}|${edge.type || ""}`;
+            if (!seen.has(key)) {
+              seen.add(key);
+              merged.push(edge);
+            }
+          });
+          return merged;
+        });
+        queuePulse(idx, `flow-${idx}`, 0);
+      }, idx * 380);
+      flowTimersRef.current.push(timer);
+    });
+
+    const finishTimer = setTimeout(() => {
+      setSearchDepth(-1);
+      setGraphMeta((prev) => ({ ...prev, status: "idle", currentDepth: -1, lastEvent: Date.now() }));
+    }, levels.length * 380 + 500);
+    flowTimersRef.current.push(finishTimer);
+  };
+
   const handleBackendEvent = (evt) => {
     if (!evt || !evt.event) return;
     const payload = evt.payload || {};
 
     if (evt.event === "function_selected") {
       const label = payload.selected_function || "?";
-      const score = payload.selected_score ?? "?";
-      addGraphStep(`Function: ${label} (${score})`);
+      setFunctionStep(label);
       setGraphMeta((prev) => ({
         ...prev,
         traceId: payload.trace_id || prev.traceId,
@@ -213,14 +324,7 @@ function App() {
         : [];
       
       addGraphStep(`✓ Búsqueda completa: ${nodeIds.length} nodos`, "ok");
-      setHighlightedNodeIds(nodeIds);
-      setHighlightedEdges(edges);
-      setSearchDepth(-1);
-      setGraphMeta((prev) => ({
-        ...prev,
-        status: "idle",
-        currentDepth: -1,
-      }));
+      animateFlowFromSeed(nodeIds, edges);
       
       // Limpiar highlights después de un tiempo
       if (highlightTimerRef.current) {
@@ -259,8 +363,20 @@ function App() {
         events.forEach((evt) => {
           handleBackendEvent(evt);
         });
+        if (backendDownRef.current) {
+          backendDownRef.current = false;
+          addGraphStep("Conexión backend restaurada", "ok");
+        }
       } catch (error) {
-        console.error("[BACKEND][events] polling_error", error?.message || error);
+        const now = Date.now();
+        if (now - lastEventsErrorRef.current > 8000) {
+          console.error("[BACKEND][events] polling_error", error?.message || error);
+          lastEventsErrorRef.current = now;
+        }
+        if (!backendDownRef.current) {
+          backendDownRef.current = true;
+          addGraphStep("Backend sin conexión (reintentando...)", "error");
+        }
       }
     }, 1500);
 
@@ -277,7 +393,11 @@ function App() {
         const edges = res.data?.edges || [];
         setGraphData({ nodes, edges });
       } catch (error) {
-        console.error("[FRONTEND][graph] polling_error", error?.message || error);
+        const now = Date.now();
+        if (now - lastGraphErrorRef.current > 8000) {
+          console.error("[FRONTEND][graph] polling_error", error?.message || error);
+          lastGraphErrorRef.current = now;
+        }
       }
     }, 1500);
 
