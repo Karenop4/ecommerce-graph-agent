@@ -85,6 +85,10 @@ function App() {
     setGraphSteps((prev) => [{ id, text, level }, ...prev].slice(0, 6));
   };
 
+  const clearNonFunctionSteps = () => {
+    setGraphSteps((prev) => prev.filter((step) => step.text.startsWith("Function:")));
+  };
+
   const setFunctionStep = (label) => {
     const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     setGraphSteps((prev) => {
@@ -141,31 +145,26 @@ function App() {
       adjacency.get(edge.to).add(edge.from);
     });
 
-    const levels = [];
+    const bfsOrder = [seed];
     const visited = new Set([seed]);
-    let frontier = [seed];
-    levels.push(frontier);
+    const queue = [seed];
 
-    while (frontier.length) {
-      const next = [];
-      frontier.forEach((id) => {
-        const neighbors = adjacency.get(id) || new Set();
-        neighbors.forEach((nb) => {
-          if (!visited.has(nb)) {
-            visited.add(nb);
-            next.push(nb);
-          }
-        });
+    while (queue.length) {
+      const current = queue.shift();
+      const neighbors = [...(adjacency.get(current) || new Set())];
+      neighbors.forEach((nb) => {
+        if (!visited.has(nb)) {
+          visited.add(nb);
+          bfsOrder.push(nb);
+          queue.push(nb);
+        }
       });
-      if (!next.length) break;
-      levels.push(next);
-      frontier = next;
     }
 
     nodeIds.forEach((id) => {
       if (!visited.has(id)) {
-        levels.push([id]);
         visited.add(id);
+        bfsOrder.push(id);
       }
     });
 
@@ -174,29 +173,21 @@ function App() {
     setSearchDepth(0);
     setGraphMeta((prev) => ({ ...prev, status: "active", currentDepth: 0, lastEvent: Date.now() }));
 
-    const edgeByLevel = levels.map((ids, idx) => {
-      const previousNodes = new Set(levels.slice(0, idx).flat());
-      const currentNodes = new Set(ids);
-      return edges.filter((edge) =>
-        (currentNodes.has(edge.from) && previousNodes.has(edge.to)) ||
-        (currentNodes.has(edge.to) && previousNodes.has(edge.from)) ||
-        (currentNodes.has(edge.from) && currentNodes.has(edge.to) && idx === 0)
-      );
-    });
-
-    levels.forEach((ids, idx) => {
+    bfsOrder.forEach((nodeId, idx) => {
       const timer = setTimeout(() => {
         setSearchDepth(idx);
         setGraphMeta((prev) => ({ ...prev, status: "active", currentDepth: idx, lastEvent: Date.now() }));
         setHighlightedNodeIds((prev) => {
           const merged = new Set(prev);
-          ids.forEach((id) => merged.add(id));
+          merged.add(nodeId);
           return [...merged];
         });
         setHighlightedEdges((prev) => {
+          const highlightedNodes = new Set([...highlightedSetFromState(prev), nodeId]);
           const seen = new Set(prev.map((e) => `${e.from}|${e.to}|${e.type || ""}`));
           const merged = [...prev];
-          edgeByLevel[idx].forEach((edge) => {
+          edges.forEach((edge) => {
+            if (!(highlightedNodes.has(edge.from) && highlightedNodes.has(edge.to))) return;
             const key = `${edge.from}|${edge.to}|${edge.type || ""}`;
             if (!seen.has(key)) {
               seen.add(key);
@@ -206,15 +197,25 @@ function App() {
           return merged;
         });
         queuePulse(idx, `flow-${idx}`, 0);
-      }, idx * 380);
+      }, idx * 460);
       flowTimersRef.current.push(timer);
     });
 
     const finishTimer = setTimeout(() => {
       setSearchDepth(-1);
       setGraphMeta((prev) => ({ ...prev, status: "idle", currentDepth: -1, lastEvent: Date.now() }));
-    }, levels.length * 380 + 500);
+    }, bfsOrder.length * 460 + 500);
     flowTimersRef.current.push(finishTimer);
+  };
+
+  const highlightedSetFromState = (edgesState) => {
+    const nodes = new Set();
+    edgesState.forEach((edge) => {
+      nodes.add(normalizeGraphId(edge.from));
+      nodes.add(normalizeGraphId(edge.to));
+    });
+    highlightedNodeIds.forEach((id) => nodes.add(normalizeGraphId(id)));
+    return nodes;
   };
 
   const handleBackendEvent = (evt) => {
@@ -234,7 +235,7 @@ function App() {
 
     if (evt.event === "queue_step_start") {
       const tool = payload.tool || "tool";
-      addGraphStep(`Paso ${payload.step || "?"}: ${tool}`);
+      clearNonFunctionSteps();
       setGraphMeta((prev) => ({
         ...prev,
         activeTool: tool,
@@ -253,12 +254,10 @@ function App() {
     }
 
     if (evt.event === "queue_step_done") {
-      addGraphStep(`OK: ${payload.tool || "tool"}`, "ok");
       return;
     }
 
     if (evt.event === "queue_step_error") {
-      addGraphStep(`Error: ${payload.tool || "tool"}`, "error");
       setGraphMeta((prev) => ({ ...prev, status: "idle" }));
       return;
     }
@@ -282,8 +281,6 @@ function App() {
       const cumulativeNodes = Array.isArray(payload.cumulative_nodes)
         ? payload.cumulative_nodes.map(normalizeGraphId)
         : nodeIds;
-      
-      addGraphStep(`BFS depth=${depth}: ${nodeIds.length} nodos`, depth === 0 ? "info" : "ok");
       
       setSearchDepth(depth);
       setHighlightedNodeIds(cumulativeNodes);
@@ -323,7 +320,6 @@ function App() {
           }))
         : [];
       
-      addGraphStep(`✓ Búsqueda completa: ${nodeIds.length} nodos`, "ok");
       animateFlowFromSeed(nodeIds, edges);
       
       // Limpiar highlights después de un tiempo
@@ -365,7 +361,7 @@ function App() {
         });
         if (backendDownRef.current) {
           backendDownRef.current = false;
-          addGraphStep("Conexión backend restaurada", "ok");
+          clearNonFunctionSteps();
         }
       } catch (error) {
         const now = Date.now();
@@ -375,7 +371,7 @@ function App() {
         }
         if (!backendDownRef.current) {
           backendDownRef.current = true;
-          addGraphStep("Backend sin conexión (reintentando...)", "error");
+          clearNonFunctionSteps();
         }
       }
     }, 1500);
@@ -717,7 +713,7 @@ function App() {
 
         <div className="graph-log">
           {graphSteps.length === 0 && (
-            <div className="graph-log-empty">Esperando pasos de fase 4...</div>
+            <div className="graph-log-empty">Function: -</div>
           )}
           {graphSteps.map((step) => (
             <div key={step.id} className={`graph-log-item ${step.level}`}>
