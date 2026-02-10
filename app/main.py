@@ -124,19 +124,79 @@ ROUTER_LABELS = [
 ]
 ROUTER_EMBEDS: Optional[List[List[float]]] = None
 DIRECT_RESPONSE_MARGIN = 0.06
+ROUTER_PENALTIES = {
+    "respuesta_directa": 0.14,
+    "user_correction": 0.10,
+}
+RISKY_ROUTER_LABELS = {"respuesta_directa", "user_correction"}
+GRAPH_HIGHLIGHT_TOOLS = {
+    "buscar_productos",
+    "buscar_relaciones_grafo",
+    "verificar_stock",
+    "verificar_stock_carrito",
+    "obtener_contacto_tienda",
+}
 
 INTENT_KEYWORDS = {
-    "browse_products": [r"\bbusco\b", r"\brecomiend", r"\bquiero ver\b", r"\bmostrar productos\b"],
+    "browse_products": [
+        r"\bbusco\b",
+        r"\brecomiend",
+        r"\bquiero ver\b",
+        r"\bmostrar productos\b",
+        r"\bdame m[aá]s informaci[oó]n\b",
+        r"\bmas informaci[oó]n\b",
+        r"\binformaci[oó]n sobre\b",
+        r"\binfo sobre\b",
+    ],
     "choose_option": [r"\bopci[oó]n\s*\d+", r"\bla segunda\b", r"\bla tercera\b", r"\bla primera\b"],
     "add_to_cart": [r"\bagrega\b", r"\bañade\b", r"\bme llevo\b", r"\bponer en carrito\b"],
     "remove_from_cart": [r"\bquita\b", r"\bremueve\b", r"\bsacar del carrito\b"],
     "view_cart": [r"\bver carrito\b", r"\bmi carrito\b", r"\bque tengo\b"],
     "purchase_or_stock": [r"\bstock\b", r"\bdisponibilidad\b", r"\bcomprar\b"],
-    "store_contact": [r"\bwhatsapp\b", r"\btel[eé]fono\b", r"\bdirecci[oó]n\b", r"\bhorario\b"],
+    "store_contact": [
+        r"\bwhatsapp\b",
+        r"\btel[eé]fono\b",
+        r"\bdirecci[oó]n\b",
+        r"\bhorario\b",
+        r"\blocal(?:es)?\b",
+        r"\btienda(?:s)?\b",
+        r"\bsucursal(?:es)?\b",
+        r"\bd[oó]nde comprar\b",
+        r"\bmuestrame los locales\b",
+        r"\bmu[eé]strame los locales\b",
+    ],
     "finalize_purchase": [r"\bfinalizar compra\b", r"\bproceder a compra\b", r"\bhaz la compra\b"],
     "user_correction": [r"\best[aá] mal\b", r"\bcorrige\b", r"\bno es as[ií]\b"],
 }
 
+
+
+SOFT_INTENT_PATTERNS = {
+    "browse_products": [
+        r"\brecomiend",
+        r"\bauricular(?:es)?\b",
+        r"\baud[ií]fono(?:s)?\b",
+        r"\blaptop\b",
+        r"\bmonitor\b",
+        r"\bmouse\b",
+        r"\bquiero (ver|buscar|explorar)\b",
+        r"\bmu[eé]strame\b",
+    ],
+    "choose_option": [
+        r"\bopci[oó]n\s*\d+\b",
+        r"\bla\s+(primera|segunda|tercera)\b",
+        r"\b(el|la)\s+\d+\b",
+    ],
+    "add_to_cart": [r"\bagrega\b", r"\bañade\b", r"\banade\b", r"\bcarrito\b", r"\bme llevo\b"],
+    "remove_from_cart": [r"\bquita\b", r"\bremueve\b", r"\bsaca\b", r"\belimina\b"],
+    "view_cart": [r"\bver carrito\b", r"\bmi carrito\b", r"\bque tengo\b", r"\bcarrito\b"],
+    "purchase_or_stock": [r"\bstock\b", r"\bdisponibilidad\b", r"\bcomprar\b", r"\bd[oó]nde comprar\b"],
+    "store_contact": [r"\bwhatsapp\b", r"\btel[eé]fono\b", r"\bdirecci[oó]n\b", r"\bhorario\b", r"\blocal(?:es)?\b", r"\btienda(?:s)?\b"],
+    "finalize_purchase": [r"\bfinaliza(r)?\b", r"\bfinalizar compra\b", r"\bproceder a compra\b", r"\bhaz la compra\b"],
+    "user_correction": [r"\best[aá] mal\b", r"\bcorrige\b", r"\bno es as[ií]\b", r"\berror\b"],
+}
+SOFT_PATTERN_BOOST = 0.07
+MAX_SOFT_BOOST = 0.21
 
 def cosine_sim(a, b) -> float:
     return float(sum(x * y for x, y in zip(a, b)))
@@ -158,28 +218,40 @@ def seleccionar_funcion(query_text: str, query_vec_norm: List[float]) -> Tuple[s
     # 2) Router semántico por similitud coseno
     sims = [cosine_sim(query_vec_norm, ROUTER_EMBEDS[i]) for i in range(len(ROUTER_LABELS))]
 
-    # Penaliza respuesta_directa como fallback para evitar sesgo
+    # Penaliza etiquetas propensas a falsos positivos semánticos.
     adjusted_sims = list(sims)
-    if "respuesta_directa" in ROUTER_LABELS:
-        idx_direct = ROUTER_LABELS.index("respuesta_directa")
-        adjusted_sims[idx_direct] = adjusted_sims[idx_direct] - 0.08
+    for label, penalty in ROUTER_PENALTIES.items():
+        if label in ROUTER_LABELS:
+            idx = ROUTER_LABELS.index(label)
+            adjusted_sims[idx] = adjusted_sims[idx] - penalty
 
-    best_idx = max(range(len(adjusted_sims)), key=lambda i: adjusted_sims[i])
+    # Ajuste léxico suave para mejorar certeza del intent sin depender solo del embedding de labels.
+    for label, patterns in SOFT_INTENT_PATTERNS.items():
+        if label not in ROUTER_LABELS:
+            continue
+        hits = sum(1 for pat in patterns if re.search(pat, normalized))
+        if hits <= 0:
+            continue
+        idx = ROUTER_LABELS.index(label)
+        adjusted_sims[idx] = adjusted_sims[idx] + min(MAX_SOFT_BOOST, hits * SOFT_PATTERN_BOOST)
 
-    # Si respuesta_directa no gana con margen claro, preferimos el siguiente intent
-    if ROUTER_LABELS[best_idx] == "respuesta_directa":
-        ranked = sorted(
-            [(i, float(adjusted_sims[i])) for i in range(len(adjusted_sims))],
-            key=lambda item: item[1],
-            reverse=True,
-        )
-        if len(ranked) > 1:
-            _, best_score = ranked[0]
-            second_idx, second_score = ranked[1]
+    ranked = sorted(
+        [(i, float(adjusted_sims[i])) for i in range(len(adjusted_sims))],
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    best_idx, best_score = ranked[0]
+
+    # Si gana una etiqueta riesgosa sin margen claro, preferimos la mejor alternativa no riesgosa.
+    if ROUTER_LABELS[best_idx] in RISKY_ROUTER_LABELS and len(ranked) > 1:
+        for second_idx, second_score in ranked[1:]:
+            if ROUTER_LABELS[second_idx] in RISKY_ROUTER_LABELS:
+                continue
             if (best_score - second_score) <= DIRECT_RESPONSE_MARGIN:
                 return ROUTER_LABELS[second_idx], second_score, adjusted_sims, "semantic_margin"
+            break
 
-    return ROUTER_LABELS[best_idx], float(adjusted_sims[best_idx]), adjusted_sims, "semantic"
+    return ROUTER_LABELS[best_idx], best_score, adjusted_sims, "semantic"
 
 
 @app.on_event("startup")
@@ -471,6 +543,20 @@ def _safe_int(x, default=1) -> int:
         return default
 
 
+def _normalize_product_ref(text: str) -> str:
+    """Normaliza referencia libre de producto (quita artículos/palabras de relleno)."""
+    t = (text or "").strip().lower()
+    t = re.sub(r"[^a-z0-9áéíóúüñ\s]", " ", t)
+    tokens = [tok for tok in t.split() if tok]
+    stop = {
+        "el", "la", "los", "las", "un", "una", "unos", "unas",
+        "al", "del", "de", "por", "favor", "carrito", "agrega", "agregar",
+        "añade", "anade", "quiero", "producto", "item",
+    }
+    cleaned = [tok for tok in tokens if tok not in stop]
+    return " ".join(cleaned).strip()
+
+
 # -------------------------
 # CARRITO helpers
 # -------------------------
@@ -499,25 +585,25 @@ def cart_add_item(state: Dict[str, Any], item: Dict[str, Any], qty: int = 1) -> 
     return state
 
 
-def cart_remove_by_name_or_id(state: Dict[str, Any], item_ref: str) -> Tuple[Dict[str, Any], bool]:
+def cart_remove_by_name_or_id(state: Dict[str, Any], item_ref: str) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """Remueve un item del carrito por id o por match parcial del nombre."""
     cart = state.get("cart_items", []) or []
     ref = (item_ref or "").strip().lower()
     if not ref:
-        return state, False
+        return state, []
 
     new_cart = []
-    removed = False
+    removed_items: List[Dict[str, Any]] = []
     for c in cart:
         cid = str(c.get("id", "")).lower()
         nombre = str(c.get("nombre", "")).lower()
         if ref == cid or ref in nombre:
-            removed = True
+            removed_items.append(c)
             continue
         new_cart.append(c)
 
     state["cart_items"] = new_cart
-    return state, removed
+    return state, removed_items
 
 
 def cart_remove_by_indexes(state: Dict[str, Any], indexes_0based: List[int]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
@@ -560,7 +646,7 @@ def cart_to_text(state: Dict[str, Any]) -> str:
         qty = _safe_int(c.get("qty", 1), 1)
         subtotal = precio * qty
         total += subtotal
-        txt += f"{i}) {c.get('nombre')} [{c.get('id')}] x{qty} = ${subtotal}\n"
+        txt += f"{i}) {c.get('nombre')} x{qty} = ${subtotal}\n"
     txt += f"Total estimado: ${total}\n"
     return txt
 
@@ -670,6 +756,10 @@ def agregar_al_carrito(producto_ref: str, qty: int = 1, user_id: str = "anonimo"
 
     qty = max(1, _safe_int(qty, 1))
 
+    # (0) referencia genérica al producto enfocado (ej: "la laptop")
+    if _is_generic_laptop_reference(ref) and state.get("selected_product_id"):
+        ref = str(state["selected_product_id"])
+
     # (1) ordinal con candidates
     idx = normalize_ordinal_to_index(ref)
     if idx is not None:
@@ -680,10 +770,16 @@ def agregar_al_carrito(producto_ref: str, qty: int = 1, user_id: str = "anonimo"
             state["selected_product_id"] = chosen["id"]
             state["stage"] = "decide"
             save_state(user_id, state)
-            return f"✅ Agregado: {chosen['nombre']} x{qty}\n\n{cart_to_text(state)}"
+            return f"✅ Agregado: {chosen['nombre']} x{qty}"
         return "No encontré esa opción en la lista. Dime 1, 2 o 3."
 
-    # (2) resolver por id o embedding
+    # (2) resolver por id, match léxico robusto o embedding
+    normalized_ref = _normalize_product_ref(ref)
+    ref_tokens = [t for t in normalized_ref.split() if t]
+
+    known_brands = {"razer", "asus", "logitech", "lenovo", "dell", "acer", "hp", "samsung", "sony"}
+    requested_brands = [tok for tok in ref_tokens if tok in known_brands]
+
     with driver.session() as session:
         prod = None
         looks_like_id = len(ref) <= 6 and ref[:1].isalpha()
@@ -692,12 +788,39 @@ def agregar_al_carrito(producto_ref: str, qty: int = 1, user_id: str = "anonimo"
                 "MATCH (p:Producto {id:$id}) RETURN p.id AS id, p.nombre AS nombre, p.precio AS precio LIMIT 1",
                 id=ref.upper()
             ).single()
+        if not prod and normalized_ref:
+            prod = session.run(
+                """
+                MATCH (p:Producto)
+                WHERE toLower(p.nombre) CONTAINS toLower($ref)
+                RETURN p.id AS id, p.nombre AS nombre, p.precio AS precio,
+                       size(p.nombre) AS len_nombre
+                ORDER BY len_nombre ASC
+                LIMIT 1
+                """,
+                ref=normalized_ref,
+            ).single()
+        if not prod and ref_tokens:
+            prod = session.run(
+                """
+                MATCH (p:Producto)
+                WHERE all(tok IN $tokens WHERE toLower(p.nombre) CONTAINS tok)
+                RETURN p.id AS id, p.nombre AS nombre, p.precio AS precio,
+                       size(p.nombre) AS len_nombre
+                ORDER BY len_nombre ASC
+                LIMIT 1
+                """,
+                tokens=ref_tokens,
+            ).single()
+        # Si pidió marca explícita, evitamos fallback semántico que puede traer otro producto.
+        if not prod and requested_brands:
+            return f"No encontré un producto que coincida con: {' '.join(requested_brands)}."
         if not prod:
-            v = embedder.encode(ref).tolist()
+            v = embedder.encode(normalized_ref or ref).tolist()
             prod = session.run("""
                 CALL db.index.vector.queryNodes('productos_embeddings', 1, $vector)
                 YIELD node AS p, score
-                WHERE score > 0.6
+                WHERE score > 0.72
                 RETURN p.id AS id, p.nombre AS nombre, p.precio AS precio
             """, vector=v).single()
 
@@ -710,7 +833,7 @@ def agregar_al_carrito(producto_ref: str, qty: int = 1, user_id: str = "anonimo"
     state["stage"] = "decide"
     save_state(user_id, state)
 
-    return f"✅ Agregado: {item['nombre']} x{qty}\n\n{cart_to_text(state)}"
+    return f"✅ Agregado: {item['nombre']} x{qty}"
 
 
 @tool
@@ -760,7 +883,7 @@ def remover_del_carrito(items_ref: str, user_id: str = "anonimo") -> str:
         if removed_items:
             removed_any = True
             for it in removed_items:
-                removed_list.append(f"{it.get('nombre')} [{it.get('id')}]")
+                removed_list.append(f"{it.get('nombre')}")
         # índices inválidos (fuera de rango)
         max_idx = len(cart_before) - 1
         invalid = [i for i in idxs if i < 0 or i > max_idx]
@@ -782,10 +905,10 @@ def remover_del_carrito(items_ref: str, user_id: str = "anonimo") -> str:
     parts = [p.strip() for p in raw.split(",") if p.strip()]
 
     for part in parts:
-        state, removed = cart_remove_by_name_or_id(state, part)
-        if removed:
+        state, removed_items = cart_remove_by_name_or_id(state, part)
+        if removed_items:
             removed_any = True
-            removed_list.append(part)
+            removed_list.extend([str(it.get("nombre")) for it in removed_items if it.get("nombre")])
         else:
             not_found.append(part)
 
@@ -918,31 +1041,62 @@ def verificar_stock_carrito(tienda: str = "", user_id: str = "anonimo") -> str:
 def obtener_contacto_tienda(nombre_tienda: str = "", user_id: str = "anonimo") -> str:
     """Obtiene teléfono/WhatsApp/horario/dirección de una tienda desde Neo4j."""
     state = get_state(user_id)
-    if not (nombre_tienda or "").strip():
+
+    requested_name = (nombre_tienda or "").strip()
+    lowered_requested = requested_name.lower()
+    asks_all_stores = (
+        not requested_name
+        or any(tok in lowered_requested for tok in ["todos", "todas", "locales", "tiendas", "sucursales"])
+    )
+
+    if not asks_all_stores and not requested_name:
         if state.get("selected_store"):
-            nombre_tienda = state["selected_store"]
+            requested_name = state["selected_store"]
         else:
             return "¿De qué tienda? Opciones: Tienda Central, Sucursal Norte, Venta Online."
 
-    logger.info(f"🛠️ [TOOL] obtener_contacto_tienda | tienda='{nombre_tienda}'")
+    logger.info(f"🛠️ [TOOL] obtener_contacto_tienda | tienda='{requested_name}' all={asks_all_stores}")
 
     with driver.session() as session:
-        row = session.run("""
-            MATCH (t:Tienda)
-            WHERE toLower(t.nombre) CONTAINS toLower($name)
-            RETURN t.nombre AS nombre, t.canal AS canal, t.telefono AS telefono,
-                   t.whatsapp AS whatsapp, t.direccion AS direccion, t.horario AS horario
-            LIMIT 1
-        """, name=nombre_tienda).single()
+        if asks_all_stores:
+            rows = [dict(r) for r in session.run("""
+                MATCH (t:Tienda)
+                RETURN t.nombre AS nombre, t.canal AS canal, t.telefono AS telefono,
+                       t.whatsapp AS whatsapp, t.direccion AS direccion, t.horario AS horario
+                ORDER BY t.nombre ASC
+            """)]
+        else:
+            rows = [dict(r) for r in session.run("""
+                MATCH (t:Tienda)
+                WHERE toLower(t.nombre) CONTAINS toLower($name)
+                RETURN t.nombre AS nombre, t.canal AS canal, t.telefono AS telefono,
+                       t.whatsapp AS whatsapp, t.direccion AS direccion, t.horario AS horario
+                ORDER BY t.nombre ASC
+                LIMIT 1
+            """, name=requested_name)]
 
-    if not row:
+    if not rows:
         return "No encontré esa tienda. Opciones: Tienda Central, Sucursal Norte, Venta Online."
 
-    update_state(user_id, {"selected_store": row["nombre"], "stage": "contact"})
+    selected_for_state = rows[0]["nombre"]
+    update_state(user_id, {"selected_store": selected_for_state, "stage": "contact"})
 
     def safe(v):
         return v if v not in (None, "") else "N/A"
 
+    if asks_all_stores:
+        lines = ["📍 Locales disponibles:"]
+        for row in rows:
+            lines.append(
+                f"- {row['nombre']} ({safe(row.get('canal'))}) | "
+                f"Tel: {safe(row.get('telefono'))} | "
+                f"WhatsApp: {safe(row.get('whatsapp'))} | "
+                f"Horario: {safe(row.get('horario'))} | "
+                f"Dirección: {safe(row.get('direccion'))}"
+            )
+        return "\n".join(lines)
+
+    row = rows[0]
     return (
         f"📍 {row['nombre']} ({safe(row.get('canal'))})\n"
         f"☎️ Tel: {safe(row.get('telefono'))}\n"
@@ -1239,6 +1393,90 @@ Tools válidas:
 """
 
 
+def _fallback_plan(router_label: str, user_id: str, state: Dict[str, Any]) -> Dict[str, Any]:
+    """Fallback determinista cuando el planner devuelve steps vacíos en intents críticos."""
+    if router_label == "finalize_purchase":
+        cart = state.get("cart_items", []) or []
+        if cart:
+            return {"steps": [{"tool": "finalizar_compra", "args": {"tienda": "", "user_id": user_id}}]}
+    return {"steps": []}
+
+
+def _query_explicitly_mentions_product(query_text: str) -> bool:
+    """Heurística: detecta si el usuario mencionó explícitamente un producto/id/ordinal."""
+    q = (query_text or "").lower()
+    patterns = [
+        r"\b[A-Za-z]\d+\b",                  # ids tipo A1, L2
+        r"\b(la|el)\s+(primera|primero|segunda|segundo|tercera|tercero|cuarta|cuarto)\b",
+        r"\bopci[oó]n\s*\d+\b",
+        r"\blaptop\b", r"\bmac\b", r"\bmacbook\b", r"\blenovo\b", r"\bdell\b",
+        r"\bmouse\b", r"\bmonitor\b", r"\baud[ií]fonos\b", r"\bteclado\b",
+        r"\brazer\b", r"\basus\b", r"\blogitech\b", r"\bacer\b", r"\bhp\b",
+        r"\bsamsung\b", r"\bsony\b",
+    ]
+    return any(re.search(pat, q) for pat in patterns)
+
+
+def _is_generic_laptop_reference(text: str) -> bool:
+    t = (text or "").strip().lower()
+    patterns = [
+        r"^laptop$",
+        r"^la laptop$",
+        r"^esa laptop$",
+        r"^la compu$",
+        r"^la computadora$",
+        r"^notebook$",
+    ]
+    return any(re.search(pat, t) for pat in patterns)
+
+
+def _sanitize_plan_for_user_intent(plan: Dict[str, Any], query_text: str, state: Dict[str, Any]) -> Dict[str, Any]:
+    """Evita autocompletar agregar_al_carrito con producto implícito cuando el usuario no lo pidió."""
+    steps = plan.get("steps", []) if isinstance(plan, dict) else []
+    if not isinstance(steps, list):
+        return plan
+
+    explicit_product = _query_explicitly_mentions_product(query_text)
+    normalized_q = (query_text or "").lower()
+    asks_add_to_cart = any(tok in normalized_q for tok in ["agrega", "añade", "anade", "carrito", "me llevo"])
+
+    sanitized_steps = []
+    seen_add_refs = set()
+    selected_pid = (state or {}).get("selected_product_id")
+
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        tool = step.get("tool")
+        args = step.get("args", {}) if isinstance(step.get("args"), dict) else {}
+
+        if tool == "agregar_al_carrito":
+            args = dict(args)
+            ref = (args.get("producto_ref") or "").strip()
+
+            if asks_add_to_cart and not explicit_product:
+                # Fuerza aclaración del producto: la tool responderá preguntando qué agregar.
+                args["producto_ref"] = ""
+
+            # Si el usuario dijo "la laptop" y ya hay foco seleccionado (ej: Dell), respétalo.
+            if selected_pid and _is_generic_laptop_reference(ref):
+                args["producto_ref"] = selected_pid
+
+            # Evita duplicados del mismo producto en la misma orden compuesta (ej: "laptop y mouse").
+            ref_key = (args.get("producto_ref") or "").strip().lower()
+            if ref_key and ref_key in seen_add_refs and " y " in normalized_q:
+                continue
+            if ref_key:
+                seen_add_refs.add(ref_key)
+
+            step = {"tool": tool, "args": args}
+
+        sanitized_steps.append(step)
+
+    plan["steps"] = sanitized_steps
+    return plan
+
+
 def planificar(query_text: str, router_label: str, user_id: str, state: Dict[str, Any]) -> Dict[str, Any]:
     """Genera un plan JSON con herramientas a ejecutar."""
     prompt = (
@@ -1258,9 +1496,21 @@ def planificar(query_text: str, router_label: str, user_id: str, state: Dict[str
         for s in plan["steps"]:
             if isinstance(s, dict) and isinstance(s.get("args"), dict):
                 s["args"]["user_id"] = user_id
+
+        plan = _sanitize_plan_for_user_intent(plan, query_text, state)
+
+        if not plan.get("steps"):
+            fallback = _fallback_plan(router_label, user_id, state)
+            if fallback.get("steps"):
+                logger.info(f"[PLANNER] fallback aplicado para intent={router_label}")
+                return fallback
         return plan
     except Exception as e:
         logger.warning(f"⚠️ [PLANNER] JSON inválido => steps=[] | err={e} | raw={raw[:200]}")
+        fallback = _fallback_plan(router_label, user_id, state)
+        if fallback.get("steps"):
+            logger.info(f"[PLANNER] fallback aplicado tras error para intent={router_label}")
+            return fallback
         return {"steps": []}
 
 
@@ -1341,7 +1591,7 @@ def ejecutar_plan(plan: Dict[str, Any], user_id: str, trace_id: str, initial_res
         try:
             out = _invoke_tool(tool_name, args)
 
-            if tool_name != "buscar_relaciones_grafo":
+            if tool_name in GRAPH_HIGHLIGHT_TOOLS and tool_name != "buscar_relaciones_grafo":
                 emit_graph_highlight_for_tool(user_id, tool_name, args)
 
             results.append({"tool": tool_name, "args": args, "output": out})
@@ -1456,8 +1706,127 @@ Reglas:
 """
 
 
+def _naturalize_generic_text(text: str) -> str:
+    clean = (text or "")
+    clean = re.sub(r"\s*\[[A-Za-z]\d+\]", "", clean)
+    clean = re.sub(r"^Opciones encontradas \(aún sin ver stock\):\n?", "", clean.strip(), flags=re.MULTILINE)
+    clean = re.sub(r"\n{3,}", "\n\n", clean)
+    return clean.strip()
+
+
+def _parse_product_options(output: str) -> List[Dict[str, Any]]:
+    lines = (output or "").splitlines()
+    items: List[Dict[str, Any]] = []
+    i = 0
+    pattern = re.compile(r"^\s*\d+\)\s*\[([^\]]+)\]\s*(.+?)\s*\(\$([0-9]+(?:\.[0-9]+)?)\)\s*$")
+    while i < len(lines):
+        line = lines[i].strip()
+        m = pattern.match(line)
+        if not m:
+            i += 1
+            continue
+        item = {"id": m.group(1), "nombre": m.group(2), "precio": m.group(3), "desc": "", "accesorios": []}
+        j = i + 1
+        while j < len(lines):
+            nxt = lines[j].strip()
+            if pattern.match(nxt):
+                break
+            if nxt.startswith("Desc:"):
+                item["desc"] = nxt.replace("Desc:", "").strip()
+            if "Accesorios:" in nxt:
+                acc = nxt.split("Accesorios:", 1)[1].strip()
+                if acc:
+                    item["accesorios"] = [a.strip() for a in acc.split(",") if a.strip()]
+            j += 1
+        items.append(item)
+        i = j
+    return items
+
+
+def _is_recommendation_query(query_text: str) -> bool:
+    q = (query_text or "").lower()
+    return any(tok in q for tok in ["recomiend", "recomendar", "sugiere", "mejor opción", "mejor opcion"]) 
+
+
+def _friendly_products_reply(query_text: str, output: str) -> str:
+    items = _parse_product_options(output)
+    if not items:
+        return f"¡Claro! 😊\n\n{_naturalize_generic_text(output)}"
+
+    if _is_recommendation_query(query_text):
+        top = items[0]
+        txt = (
+            f"¡Claro! 😊 Te recomiendo **{top['nombre']}** por su perfil empresarial.\n\n"
+            f"Precio estimado: ${top['precio']}\n"
+            f"Descripción: {top['desc'] or 'Excelente opción para productividad y trabajo diario.'}"
+        )
+        if top.get("accesorios"):
+            txt += f"\n\nSi quieres, también te sugiero combinarla con: {', '.join(top['accesorios'][:2])}."
+        txt += "\n\nSi te gusta, te la agrego al carrito."
+        return txt
+
+    lines = ["¡Claro! 😊 Estas son las opciones más relevantes que encontré:"]
+    for it in items[:3]:
+        lines.append(f"- {it['nombre']} (${it['precio']}): {it['desc']}")
+    lines.append("\nSi quieres, te ayudo a elegir la mejor según tu presupuesto o uso.")
+    return "\n".join(lines)
+
+
 def redactar_respuesta(query_text: str, tool_results: List[Dict[str, Any]], state: Dict[str, Any]) -> str:
     """Redacta respuesta final usando el contexto de herramientas."""
+    if tool_results:
+        cleaned_results: List[Dict[str, Any]] = []
+        for r in tool_results:
+            out = str(r.get("output", "")).strip()
+            if not out:
+                continue
+            cleaned_results.append({"tool": str(r.get("tool", "")), "output": out})
+
+        if cleaned_results:
+            deduped: List[Dict[str, Any]] = []
+            seen_pairs = set()
+            for r in cleaned_results:
+                key = (r["tool"], r["output"])
+                if key in seen_pairs:
+                    continue
+                seen_pairs.add(key)
+                deduped.append(r)
+
+            # Para carrito, priorizamos salida determinista de tools (evita alucinaciones).
+            cart_tools = {"agregar_al_carrito", "remover_del_carrito", "vaciar_carrito", "ver_carrito"}
+            if any(r["tool"] in cart_tools for r in deduped):
+                has_action = any(r["tool"] in {"agregar_al_carrito", "remover_del_carrito", "vaciar_carrito"} for r in deduped)
+                cart_outputs: List[str] = []
+                seen_cart_out = set()
+                for r in deduped:
+                    if r["tool"] not in cart_tools:
+                        continue
+                    if has_action and r["tool"] == "ver_carrito":
+                        continue
+                    out = _naturalize_generic_text(r["output"])
+                    if out in seen_cart_out:
+                        continue
+                    seen_cart_out.add(out)
+                    cart_outputs.append(out)
+                if cart_outputs:
+                    return "\n".join(cart_outputs)
+
+            contexto_tools = "\n\n".join(
+                f"[{r['tool']}]\n{_naturalize_generic_text(r['output'])}" for r in deduped
+            )
+
+            msg = llm.invoke([
+                SystemMessage(content=RESPONDER_SYSTEM),
+                HumanMessage(content=(
+                    "Reescribe de forma natural y breve para el usuario usando SOLO estos resultados "
+                    "de herramientas (no inventes datos, no cambies montos ni productos):\n\n"
+                    f"Consulta del usuario: {query_text}\n\n"
+                    f"Resultados tools:\n{contexto_tools}\n\n"
+                    "Entrega una sola respuesta final clara en español."
+                ))
+            ])
+            return str(msg.content).strip()
+
     contexto = ""
     for r in tool_results:
         contexto += f"[TOOL={r['tool']} ARGS={r['args']}]\n{r['output']}\n\n"
