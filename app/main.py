@@ -1628,7 +1628,7 @@ Reglas:
 
 def redactar_respuesta(query_text: str, tool_results: List[Dict[str, Any]], state: Dict[str, Any]) -> str:
     """Redacta respuesta final usando el contexto de herramientas."""
-    # Si hay salida de tools, priorizamos respuesta determinista para evitar alucinaciones.
+    # Si hay salida de tools, priorizamos factualidad + tono amable (sin alucinaciones).
     if tool_results:
         outputs: List[str] = []
         seen = set()
@@ -1640,8 +1640,33 @@ def redactar_respuesta(query_text: str, tool_results: List[Dict[str, Any]], stat
                 continue
             seen.add(out)
             outputs.append(out)
+
         if outputs:
-            return "\n\n".join(outputs)
+            tools = [str(r.get("tool", "")) for r in tool_results]
+            combined = "\n\n".join(outputs)
+
+            # Respuestas amables por intención sin cambiar hechos de tools.
+            if any(t == "buscar_productos" for t in tools):
+                return (
+                    "¡Claro! 😊 Te ayudo con gusto. Encontré estas opciones para ti:\n\n"
+                    f"{combined}\n\n"
+                    "Si quieres, te recomiendo una según tu presupuesto o uso (oficina, clases, diseño, etc.)."
+                )
+
+            if any(t in {"agregar_al_carrito", "remover_del_carrito", "ver_carrito", "vaciar_carrito"} for t in tools):
+                return (
+                    "¡Listo! 😊 Ya actualicé tu carrito:\n\n"
+                    f"{combined}\n\n"
+                    "Cuando quieras, te ayudo a revisar stock o continuar con la compra."
+                )
+
+            if any(t in {"verificar_stock", "verificar_stock_carrito", "obtener_contacto_tienda", "finalizar_compra"} for t in tools):
+                return (
+                    "Perfecto 👍 Te comparto la información:\n\n"
+                    f"{combined}"
+                )
+
+            return f"¡Con gusto! 😊\n\n{combined}"
 
     contexto = ""
     for r in tool_results:
