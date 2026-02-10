@@ -8,6 +8,7 @@ A sophisticated e-commerce intelligent agent powered by AI that leverages a know
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![LangChain](https://img.shields.io/badge/LangChain-1C3C3C?style=for-the-badge&logo=chainlink&logoColor=white)
+![LangGraph](https://img.shields.io/badge/LangGraph-111827?style=for-the-badge&logo=graphql&logoColor=white)
 ![OpenAI](https://img.shields.io/badge/OpenAI-412991?style=for-the-badge&logo=openai&logoColor=white)
 ![Neo4j](https://img.shields.io/badge/Neo4j-008CC1?style=for-the-badge&logo=neo4j&logoColor=white)
 ![MLflow](https://img.shields.io/badge/MLflow-0194E4?style=for-the-badge&logo=mlflow&logoColor=white)
@@ -65,7 +66,7 @@ The system follows a microservices architecture with Docker containerization:
 ┌──────────────────────▼──────────────────────────────────────┐
 │                   BACKEND (FastAPI)                         │
 │         AI Agent API Server (Port 8000)                     │
-│  - LangChain Orchestration                                  │
+│  - LangGraph + LangChain Orchestration                      │
 │  - OpenAI/GPT-4o-mini LLM                                   │
 │  - Tool-based agent with Neo4j queries                      │
 │  - MLflow Tracking                                          │
@@ -154,7 +155,9 @@ grafo-conocimiento/
 │
 ├── Notebooks/                          # Jupyter Notebooks
 │   ├── 1_etl_graph_population.ipynb   # Data loading & graph setup
-│   └── 2_agent_mlflow_experiment.ipynb # Agent experimentation & tracking
+│   ├── 2_agent_mlflow_experiment.ipynb # Agent experimentation & tracking
+│   └── Aplicación/                     # Notebooks orientados a la app
+│       └── README.md
 │
 ├── neo4j_data/                         # Neo4j database volume
 │   ├── databases/                      # Database files
@@ -274,6 +277,9 @@ NEO4J_PASSWORD=your_password
 # MLflow
 MLFLOW_TRACKING_URI=http://mlflow:5000
 MLFLOW_TRACKING_URI_LOCAL=http://localhost:5000
+
+# Backend demo mode (optional)
+TOOLS_PRINT_ONLY=false
 
 # Frontend
 VITE_API_URL=http://localhost:8000
@@ -455,6 +461,7 @@ curl -X POST http://localhost:8000/chat \
 5. Tools execute Cypher queries against Neo4j
    ↓
 6. LLM processes results and crafts response
+   - Optional demo mode: backend tools can run as step-by-step print logs only (`TOOLS_PRINT_ONLY=true`)
    ↓
 7. MLflow logs metrics and results
    ↓
@@ -587,52 +594,19 @@ jupyter notebook Notebooks/
 
 ---
 
-## License
+## Conclusions
 
-This project is part of the **Stochastic Models** course - 6th Cycle.
-
----
-
-## Author
-
-**Karen Ortiz** - Computer Science Engineering
+- The project implements an end-to-end conversational agent with semantic routing, planning, and step monitoring.
+- LangGraph is used to orchestrate the execution flow across embedding, function selection, planning, execution, and response generation.
+- The architecture is production-ready for iterative MLOps improvements while still supporting demo-friendly execution traces.
 
 ---
 
-## Acknowledgments
+## Contact
+* **Karen Ortiz** - [Github](https://github.com/Karenop4)  
+  Contact: +593 99 444 1682 - karenorpe2004@gmail.com
+  
+* **Andrés Encalada** - [Github](https://github.com/AndresEncalada)  
+  Contact: +593 98 358 6619 - andres23102004@gmail.com
 
-- OpenAI for GPT-4o-mini LLM
-- Neo4j for graph database technology
-- LangChain for agent orchestration framework
-- MLflow for MLOps capabilities
-- React & Vite communities for modern web tooling
 
----
-
-**Last Updated**: February 1, 2026
-
----
-
-### Quick Commands Reference
-
-```bash
-# Start everything
-docker-compose up -d
-
-# View logs
-docker-compose logs -f backend
-
-# Access services
-curl http://localhost:8000/docs           # API docs (Swagger)
-http://localhost:5173                      # Frontend
-http://localhost:7474                      # Neo4j Browser
-
-# Develop
-docker-compose down
-cd app && python main.py                   # Local backend
-cd frontend-agente && npm run dev          # Local frontend
-
-# Clean
-docker-compose down -v                     # Remove volumes
-docker system prune -a                     # Remove all images
-```
