@@ -585,25 +585,25 @@ def cart_add_item(state: Dict[str, Any], item: Dict[str, Any], qty: int = 1) -> 
     return state
 
 
-def cart_remove_by_name_or_id(state: Dict[str, Any], item_ref: str) -> Tuple[Dict[str, Any], bool]:
+def cart_remove_by_name_or_id(state: Dict[str, Any], item_ref: str) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """Remueve un item del carrito por id o por match parcial del nombre."""
     cart = state.get("cart_items", []) or []
     ref = (item_ref or "").strip().lower()
     if not ref:
-        return state, False
+        return state, []
 
     new_cart = []
-    removed = False
+    removed_items: List[Dict[str, Any]] = []
     for c in cart:
         cid = str(c.get("id", "")).lower()
         nombre = str(c.get("nombre", "")).lower()
         if ref == cid or ref in nombre:
-            removed = True
+            removed_items.append(c)
             continue
         new_cart.append(c)
 
     state["cart_items"] = new_cart
-    return state, removed
+    return state, removed_items
 
 
 def cart_remove_by_indexes(state: Dict[str, Any], indexes_0based: List[int]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
@@ -646,7 +646,7 @@ def cart_to_text(state: Dict[str, Any]) -> str:
         qty = _safe_int(c.get("qty", 1), 1)
         subtotal = precio * qty
         total += subtotal
-        txt += f"{i}) {c.get('nombre')} [{c.get('id')}] x{qty} = ${subtotal}\n"
+        txt += f"{i}) {c.get('nombre')} x{qty} = ${subtotal}\n"
     txt += f"Total estimado: ${total}\n"
     return txt
 
@@ -770,12 +770,15 @@ def agregar_al_carrito(producto_ref: str, qty: int = 1, user_id: str = "anonimo"
             state["selected_product_id"] = chosen["id"]
             state["stage"] = "decide"
             save_state(user_id, state)
-            return f"✅ Agregado: {chosen['nombre']} x{qty}\n\n{cart_to_text(state)}"
+            return f"✅ Agregado: {chosen['nombre']} x{qty}"
         return "No encontré esa opción en la lista. Dime 1, 2 o 3."
 
     # (2) resolver por id, match léxico robusto o embedding
     normalized_ref = _normalize_product_ref(ref)
     ref_tokens = [t for t in normalized_ref.split() if t]
+
+    known_brands = {"razer", "asus", "logitech", "lenovo", "dell", "acer", "hp", "samsung", "sony"}
+    requested_brands = [tok for tok in ref_tokens if tok in known_brands]
 
     with driver.session() as session:
         prod = None
@@ -809,6 +812,9 @@ def agregar_al_carrito(producto_ref: str, qty: int = 1, user_id: str = "anonimo"
                 """,
                 tokens=ref_tokens,
             ).single()
+        # Si pidió marca explícita, evitamos fallback semántico que puede traer otro producto.
+        if not prod and requested_brands:
+            return f"No encontré un producto que coincida con: {' '.join(requested_brands)}."
         if not prod:
             v = embedder.encode(normalized_ref or ref).tolist()
             prod = session.run("""
@@ -827,7 +833,7 @@ def agregar_al_carrito(producto_ref: str, qty: int = 1, user_id: str = "anonimo"
     state["stage"] = "decide"
     save_state(user_id, state)
 
-    return f"✅ Agregado: {item['nombre']} x{qty}\n\n{cart_to_text(state)}"
+    return f"✅ Agregado: {item['nombre']} x{qty}"
 
 
 @tool
@@ -877,7 +883,7 @@ def remover_del_carrito(items_ref: str, user_id: str = "anonimo") -> str:
         if removed_items:
             removed_any = True
             for it in removed_items:
-                removed_list.append(f"{it.get('nombre')} [{it.get('id')}]")
+                removed_list.append(f"{it.get('nombre')}")
         # índices inválidos (fuera de rango)
         max_idx = len(cart_before) - 1
         invalid = [i for i in idxs if i < 0 or i > max_idx]
@@ -899,10 +905,10 @@ def remover_del_carrito(items_ref: str, user_id: str = "anonimo") -> str:
     parts = [p.strip() for p in raw.split(",") if p.strip()]
 
     for part in parts:
-        state, removed = cart_remove_by_name_or_id(state, part)
-        if removed:
+        state, removed_items = cart_remove_by_name_or_id(state, part)
+        if removed_items:
             removed_any = True
-            removed_list.append(part)
+            removed_list.extend([str(it.get("nombre")) for it in removed_items if it.get("nombre")])
         else:
             not_found.append(part)
 
@@ -1789,10 +1795,13 @@ def redactar_respuesta(query_text: str, tool_results: List[Dict[str, Any]], stat
             # Para carrito, priorizamos salida determinista de tools (evita alucinaciones).
             cart_tools = {"agregar_al_carrito", "remover_del_carrito", "vaciar_carrito", "ver_carrito"}
             if any(r["tool"] in cart_tools for r in deduped):
+                has_action = any(r["tool"] in {"agregar_al_carrito", "remover_del_carrito", "vaciar_carrito"} for r in deduped)
                 cart_outputs: List[str] = []
                 seen_cart_out = set()
                 for r in deduped:
                     if r["tool"] not in cart_tools:
+                        continue
+                    if has_action and r["tool"] == "ver_carrito":
                         continue
                     out = _naturalize_generic_text(r["output"])
                     if out in seen_cart_out:
@@ -1800,7 +1809,7 @@ def redactar_respuesta(query_text: str, tool_results: List[Dict[str, Any]], stat
                     seen_cart_out.add(out)
                     cart_outputs.append(out)
                 if cart_outputs:
-                    return "¡Listo! 😊\n\n" + "\n\n".join(cart_outputs)
+                    return "\n".join(cart_outputs)
 
             contexto_tools = "\n\n".join(
                 f"[{r['tool']}]\n{_naturalize_generic_text(r['output'])}" for r in deduped
